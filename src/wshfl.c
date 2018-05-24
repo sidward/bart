@@ -82,26 +82,11 @@ static const char help_str[] = "Perform wave-shuffling reconstruction.\n\n"
 															 "  * reorder - (    n,  3,  1,  1,  1,  1,  1)\n"
 															 "  * data    - (   wx, nc,  n,  1,  1,  1,  1)";
 
-/* Helper function to print out operator dimensions. */
-static void print_opdims(const struct linop_s* op) 
-{
-  const struct iovec_s* domain = linop_domain(op);
-  const struct iovec_s* codomain = linop_codomain(op);
-  debug_printf(DP_INFO, "domain:");
-  for (unsigned int idx = 0; idx < domain->N; idx ++)
-    debug_printf(DP_INFO, " %ld", domain->dims[idx]);
-  debug_printf(DP_INFO, "\n");
-  debug_printf(DP_INFO, "codomain:");
-  for (unsigned int idx = 0; idx < codomain->N; idx ++)
-    debug_printf(DP_INFO, " %ld", codomain->dims[idx]);
-  debug_printf(DP_INFO, "\n");
-}
-
 /* Construct sampling mask from reorder tables. */
 static void construct_mask(long reorder_dims[WDIM], complex float* reorder, 
-                           long mask_dims[WDIM], complex float* mask)
+                           long mask_dims[WDIM],    complex float* mask)
 {
-  int n = reorder_dims[0];
+  int n  = reorder_dims[0];
   int sy = mask_dims[1];
   int sz = mask_dims[2];
   int tf = mask_dims[5];
@@ -121,63 +106,79 @@ static void construct_mask(long reorder_dims[WDIM], complex float* reorder,
 	md_copy(WDIM, mask_dims, mask, m, sizeof(complex float));
 }
 
-/* Collapse over the time dimension in a memory efficient manner. */
-static void  collapse_data(long reorder_dims[WDIM], complex float* reorder, 
-                           const struct linop_s* phi_op, 
-                           long data_dims[WDIM], complex float* data, 
+/* Collapse table into the temporal basis. */
+static void collapse_table(long reorder_dims[WDIM],  complex float* reorder,
+                           long phi_dims[WDIM],      complex float* phi, 
+                           long data_dims[WDIM],     complex float* data,
                            long collapse_dims[WDIM], complex float* collapse)
 {
-  long wx = collapse_dims[0];
+  long wx = data_dims[0];
   long sy = collapse_dims[1];
   long sz = collapse_dims[2];
-  long nc = collapse_dims[3]; 
-  long md = collapse_dims[4]; // Should be 1.
+  long nc = data_dims[1];
+  long n  = data_dims[2];
   long tf = phi_dims[5];
   long tk = phi_dims[6];
-  long n = reorder_dims[0];
+  int  t  = -1;
 
-  long vec_dims = {wx, 1, 1, nc, 1, tf, 1};
-  long vec_copy_dims = {wx, nc, 1, 1, 1, 1, 1};
-  long vec_out_dims = {wx, 1, 1, nc, 1, 1, tk};
-  complex float vec[tf][nc][sx];
+  long vec_dims[]     = {wx * nc,      tf,  1};
+  long phi_mat_dims[] = {      1,      tf, tk};
+  long phi_out_dims[] = {wx * nc,       1, tk};
+  long fmac_dims[]    = {wx * nc,      tf, tk};
 
-  int ky = -1;
-  int kz = -1;
-  int t = -1;
+  long out_dims[]     = {wx, nc, tk, sy, sz, 1, 1};
+  long copy_dim[]     = {wx * nc};
 
-  // Sweep through all (ky, kz) points.
-  for (int ydx = 0; ydx < sy; ydx ++) {
-    for (int zdx = 0; zdx < sz; zdx ++) {
+  complex float* vec = md_alloc(   3, vec_dims, CFL_SIZE);
+  complex float* out = md_alloc(WDIM, out_dims, CFL_SIZE);
 
-      md_clear(WDIM, vec_dims, vec, sizeof(complex float));
+	long vec_str[3];
+	md_calc_strides(3, vec_str, vec_dims, CFL_SIZE);
 
-      // Search reorder table for matching indexs.
-      for (int ndx = 0; ndx < n; ndx ++) {
+	long phi_mat_str[3];
+	md_calc_strides(3, phi_mat_str, phi_mat_dims, CFL_SIZE);
 
-        ky = reorder[ndx];
-        kz = reorder[ndx + n];
-        t  = reorder[ndx + 2 * n];
+	long phi_out_str[3];
+	md_calc_strides(3, phi_out_str, phi_out_dims, CFL_SIZE);
 
-        if ((ky == ydx) && (kz == zdx)) {
-	        md_copy(WDIM, vec_copy_dims, vec[t], data[ndx], sizeof(complex float));
+	long fmac_str[3];
+	md_calc_strides(3, fmac_str, fmac_dims, CFL_SIZE);
+
+  for (int ky = 0; ky < sy; ky ++) {
+    for (int kz = 0; kz < sz; kz ++) {
+
+      md_clear(3, vec_dims, vec, CFL_SIZE);
+
+      for (int i = 0; i < n; i ++) {
+        if ((ky == reorder[i]) && (kz == reorder[i + n])) {
+          t = reorder[i + 2 * n];
+          md_copy(1, copy_dim, (vec + t * wx * nc), (data + i * wx * nc), CFL_SIZE);
         }
-
       }
 
-      linop_adjoint(phi_op, WDIM, vec_out_dims, collapse[tdx], //TODO
-			unsigned int SN, const long sdims[SN], const complex float* src)
+      md_zfmacc2(3, fmac_dims, phi_out_str, (out + (kz * sy + ky) * (wx * nc * tk)), vec_str, vec, 
+        phi_mat_str, phi);
+
     }
   }
+
+  unsigned int permute_order[] = {0, 3, 4, 1, 5, 6, 2};
+  long input_dims[] = {wx, nc, tk, sy, sz, 1, 1};
+
+  md_permute(WDIM, permute_order, collapse_dims, collapse, input_dims, out, CFL_SIZE);
+
+  md_free(vec);
+  md_free(out);
 }
 
 int main_wshfl(int argc, char* argv[])
 {
-  float lambda = 1E-6;
-  int maxiter = 50;
-  int blksize = 8;
-  float step = 0.95;
-  float tol = 1.E-3;
-  bool llr = false;
+  float lambda  = 1E-6;
+  int   maxiter = 50;
+  int   blksize = 8;
+  float step    = 0.95;
+  float tol     = 1.E-3;
+  bool  llr     = false;
            
   const struct opt_s opts[] = {
     OPT_FLOAT('r', &lambda,  "lambda", "Soft threshold lambda for wavelet or locally low rank."),
@@ -225,45 +226,16 @@ int main_wshfl(int argc, char* argv[])
   int tf = phi_dims[5];
   int tk = phi_dims[6];
 
-  long coeff_dims[] = {sx, sy, sz, 1, md, 1, tk};
-
   long mask_dims[] = {1, sy, sz, 1, 1, tf, 1};
   complex float* mask = md_alloc(WDIM, mask_dims, sizeof(complex float));
   construct_mask(reorder_dims, reorder, mask_dims, mask);
 
-  long maps_op_dims[] = {sx, sy, sz, nc, md, 1, tk};
-  const struct linop_s* maps_op = linop_fmac_create(WDIM, maps_op_dims, MAPS_FLAG, 
-    COIL_FLAG, ~(FFT_FLAGS|COIL_FLAG|MAPS_FLAG), maps);
-  debug_printf(DP_INFO, "ESPIRiT operator information.\n");
-  print_opdims(maps_op);
+  long collapse_dims[] = {wx, sy, sz, nc, 1, 1, tk};
 
-  long resize_op_in_dims[]  = {sx, sy, sz, nc, 1, 1, tk};
-  long resize_op_out_dims[] = {wx, sy, sz, nc, 1, 1, tk};
-  const struct linop_s* resize_op = linop_resize_create(WDIM, resize_op_out_dims, resize_op_in_dims);
-  debug_printf(DP_INFO, "Resize operator information.\n");
-  print_opdims(resize_op);
+	complex float* collapse = create_cfl(argv[6], WDIM, collapse_dims);// TODO change "create cfl"
+  collapse_table(reorder_dims, reorder, phi_dims, phi, data_dims, data, collapse_dims, collapse);
 
-  long fft_op_dims[] = {wx, sy, sz, nc, 1, 1, tk};
-  const struct linop_s* fx_op = linop_fftc_create(WDIM, fft_op_dims, READ_FLAG);
-  const struct linop_s* wave_op = linop_cdiag_create(WDIM, fft_op_dims, FFT_FLAGS, wave);
-  const struct linop_s* fyz_op = linop_fftc_create(WDIM, fft_op_dims, PHS1_FLAG|PHS2_FLAG);
-  debug_printf(DP_INFO, "Fx operator information.\n");
-  print_opdims(fx_op);
-  debug_printf(DP_INFO, "Wave operator information.\n");
-  print_opdims(wave_op);
-  debug_printf(DP_INFO, "Fyz operator information.\n");
-  print_opdims(fyz_op);
-
-  long phi_op_dims[] = {wx, sy, sz, nc, 1, tf, tk};
-  const struct linop_s* phi_op = linop_fmac_create(WDIM, phi_op_dims, COEFF_FLAG, 
-      TE_FLAG, ~(TE_FLAG|COEFF_FLAG), phi);
-  debug_printf(DP_INFO, "Phi operator information.\n");
-  print_opdims(phi_op);
-
-  long mask_op_dims[] = {wx, sy, sz, nc, 1, tf, tk};
-  const struct linop_s* mask_op = linop_cdiag_create(WDIM, mask_op_dims, PHS1_FLAG|PHS2_FLAG|TE_FLAG, mask);
-  debug_printf(DP_INFO, "Mask operator information.\n");
-  print_opdims(mask_op);
+  long coeff_dims[] = {sx, sy, sz, 1, md, 1, tk};
 
   long blkdims[MAX_LEV][DIMS];
   llr_blkdims(blkdims, ~COEFF_DIM, coeff_dims, blksize);
@@ -271,18 +243,6 @@ int main_wshfl(int argc, char* argv[])
   const struct operator_p_s* threshold_op = ((llr) ?
     (lrthresh_create(coeff_dims, true, ~COEFF_DIM, (const long (*)[])blkdims, lambda, false, false)) :
     (prox_wavelet_thresh_create(WDIM, coeff_dims, FFT_FLAGS, 0u, minsize, lambda, false)));
-
-  complex float* proj = md_alloc(WDIM, coeff_dims, sizeof(complex float));
-  construct_proj(reorder_dims, reorder, phi_dims, phi, data_dims, data);
-
-
-  linop_free(maps_op);
-  linop_free(resize_op);
-  linop_free(fx_op);
-  linop_free(wave_op);
-  linop_free(fyz_op);
-  linop_free(phi_op);
-  linop_free(mask_op);
 
   unmap_cfl(WDIM, maps_dims,    maps);
   unmap_cfl(WDIM, wave_dims,    wave);
