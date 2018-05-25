@@ -106,7 +106,7 @@ static void construct_mask(long reorder_dims[WDIM], complex float* reorder,
 	md_copy(WDIM, mask_dims, mask, m, sizeof(complex float));
 }
 
-/* Collapse table into the temporal basis. */
+/* Collapse table into the temporal basis for memory efficiency. */
 static void collapse_table(long reorder_dims[WDIM],  complex float* reorder,
                            long phi_dims[WDIM],      complex float* phi, 
                            long data_dims[WDIM],     complex float* data,
@@ -116,15 +116,15 @@ static void collapse_table(long reorder_dims[WDIM],  complex float* reorder,
   long sy = collapse_dims[1];
   long sz = collapse_dims[2];
   long nc = data_dims[1];
-  long n  = data_dims[2];
+  long n  = reorder_dims[0];
   long tf = phi_dims[5];
   long tk = phi_dims[6];
   int  t  = -1;
 
-  long vec_dims[]     = {wx * nc,      tf,  1};
-  long phi_mat_dims[] = {      1,      tf, tk};
-  long phi_out_dims[] = {wx * nc,       1, tk};
-  long fmac_dims[]    = {wx * nc,      tf, tk};
+  long vec_dims[]     = {wx * nc, tf,  1};
+  long phi_mat_dims[] = {      1, tf, tk};
+  long phi_out_dims[] = {wx * nc,  1, tk};
+  long fmac_dims[]    = {wx * nc, tf, tk};
 
   long out_dims[]     = {wx, nc, tk, sy, sz, 1, 1};
   long copy_dim[]     = {wx * nc};
@@ -169,6 +169,83 @@ static void collapse_table(long reorder_dims[WDIM],  complex float* reorder,
 
   md_free(vec);
   md_free(out);
+}
+
+/* ESPIRiT operator. */
+static void E(long input_dims[WDIM], complex float* input,
+              long maps_dims[WDIM],  complex float* maps, 
+              bool adj,
+              long out_dims[WDIM],   complex float* out)
+{
+	long input_str[WDIM];
+	md_calc_strides(WDIM, input_str, input_dims, CFL_SIZE);
+
+	long maps_str[WDIM];
+	md_calc_strides(WDIM, maps_str, maps_dims, CFL_SIZE);
+
+	long fmac_dims[WDIM];
+	md_merge_dims(WDIM, fmac_dims, input_dims, maps_dims);
+	long fmac_str[WDIM];
+	md_calc_strides(WDIM, fmac_str, fmac_dims, CFL_SIZE);
+
+  unsigned long squash = (adj ? 8 : 16);
+	md_select_dims(WDIM, ~squash, out_dims, fmac_dims);
+	long out_str[WDIM];
+	md_calc_strides(WDIM, out_str, out_dims, CFL_SIZE);
+
+	(adj ? md_zfmacc2 : md_zfmac2)(WDIM, fmac_dims, out_str, out, input_str, input, maps_str, maps);
+}
+
+/* Resize operator. */
+static void R(long input_dims[WDIM], complex float* input,
+              long sx, long wx, bool adj,
+              long out_dims[WDIM],   complex float* out)
+{
+  md_copy_dims(WDIM, out_dims, input_dims);
+  out_dims[0] = (adj ? sx : wx);
+	md_resize_center(WDIM, out_dims, out, input_dims, input, CFL_SIZE);
+}
+
+/* Wave operator. */
+static void W(long input_dims[WDIM], complex float* input,
+              long wave_dims[WDIM],  complex float* wave, 
+              bool adj,
+              long out_dims[WDIM],   complex float* out)
+{
+	long input_str[WDIM];
+	md_calc_strides(WDIM, input_str, input_dims, CFL_SIZE);
+
+	long wave_str[WDIM];
+	md_calc_strides(WDIM, wave_str, wave_dims, CFL_SIZE);
+
+	long fmac_dims[WDIM];
+	md_merge_dims(WDIM, fmac_dims, input_dims, wave_dims);
+	long fmac_str[WDIM];
+	md_calc_strides(WDIM, fmac_str, fmac_dims, CFL_SIZE);
+
+	md_copy_dims(WDIM, out_dims, input_dims);
+	long out_str[WDIM];
+	md_calc_strides(WDIM, out_str, out_dims, CFL_SIZE);
+
+	(adj ? md_zfmacc2 : md_zfmac2)(WDIM, fmac_dims, out_str, out, input_str, input, wave_str, wave);
+}
+
+/* Fourier along readout. */
+static void Fx(long input_dims[WDIM], complex float* input,
+               bool adj,
+               long out_dims[WDIM],   complex float* out)
+{
+  md_copy_dims(WDIM, out_dims, input_dims);
+  (adj ? ifftuc(WDIM, input_dims, 1, out, input) : fftuc(WDIM, input_dims, 1, out, input));
+}
+
+/* Fourier along phase encode directions. */
+static void Fyz(long input_dims[WDIM], complex float* input,
+               bool adj,
+               long out_dims[WDIM],    complex float* out)
+{
+  md_copy_dims(WDIM, out_dims, input_dims);
+  (adj ? ifftuc(WDIM, input_dims, 6, out, input) : fftuc(WDIM, input_dims, 6, out, input));
 }
 
 int main_wshfl(int argc, char* argv[])
@@ -227,12 +304,11 @@ int main_wshfl(int argc, char* argv[])
   int tk = phi_dims[6];
 
   long mask_dims[] = {1, sy, sz, 1, 1, tf, 1};
-  complex float* mask = md_alloc(WDIM, mask_dims, sizeof(complex float));
+  complex float* mask = md_alloc(WDIM, mask_dims, CFL_SIZE);
   construct_mask(reorder_dims, reorder, mask_dims, mask);
 
   long collapse_dims[] = {wx, sy, sz, nc, 1, 1, tk};
-
-	complex float* collapse = create_cfl(argv[6], WDIM, collapse_dims);// TODO change "create cfl"
+	complex float* collapse = md_alloc(WDIM, collapse_dims, CFL_SIZE); 
   collapse_table(reorder_dims, reorder, phi_dims, phi, data_dims, data, collapse_dims, collapse);
 
   long coeff_dims[] = {sx, sy, sz, 1, md, 1, tk};
@@ -243,6 +319,9 @@ int main_wshfl(int argc, char* argv[])
   const struct operator_p_s* threshold_op = ((llr) ?
     (lrthresh_create(coeff_dims, true, ~COEFF_DIM, (const long (*)[])blkdims, lambda, false, false)) :
     (prox_wavelet_thresh_create(WDIM, coeff_dims, FFT_FLAGS, 0u, minsize, lambda, false)));
+
+  md_free(mask);
+  md_free(collapse);
 
   unmap_cfl(WDIM, maps_dims,    maps);
   unmap_cfl(WDIM, wave_dims,    wave);
