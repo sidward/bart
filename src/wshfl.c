@@ -91,19 +91,16 @@ static void construct_mask(long reorder_dims[WDIM], complex float* reorder,
   int sz = mask_dims[2];
   int tf = mask_dims[5];
 
-  int ydx = -1;
-  int zdx = -1;
-  int tdx = -1;
-
-	complex float m[tf][sz][sy];
-  for (int idx = 0; idx < n; idx ++) {
-    ydx = reorder[idx];
-    zdx = reorder[idx + n];
-    tdx = reorder[idx + 2 * n];
-    m[tdx][zdx][ydx] = 1;
+  int y = -1;
+  int z = -1;
+  int t = -1;
+  
+  for (int i = 0; i < n; i++) {
+    y = reorder[i];
+    z = reorder[i + n];
+    t = reorder[i + 2 * n];
+    mask[(y + z * sy) + t * sy * sz] = 1;
   }
-
-	md_copy(WDIM, mask_dims, mask, m, sizeof(complex float));
 }
 
 /* Collapse table into the temporal basis for memory efficiency. */
@@ -129,8 +126,8 @@ static void collapse_table(long reorder_dims[WDIM],  complex float* reorder,
   long out_dims[]     = {wx, nc, tk, sy, sz, 1, 1, 1};
   long copy_dim[]     = {wx * nc};
 
-  complex float* vec = md_alloc(   3, vec_dims, CFL_SIZE);
-  complex float* out = md_alloc(WDIM, out_dims, CFL_SIZE);
+  complex float* vec = md_calloc(   3, vec_dims, CFL_SIZE);
+  complex float* out = md_calloc(WDIM, out_dims, CFL_SIZE);
 
 	long vec_str[3];
 	md_calc_strides(3, vec_str, vec_dims, CFL_SIZE);
@@ -163,9 +160,7 @@ static void collapse_table(long reorder_dims[WDIM],  complex float* reorder,
   }
 
   unsigned int permute_order[] = {0, 3, 4, 1, 5, 6, 2, 7};
-  long input_dims[] = {wx, nc, tk, sy, sz, 1, 1, 1};
-
-  md_permute(WDIM, permute_order, collapse_dims, collapse, input_dims, out, CFL_SIZE);
+  md_permute(WDIM, permute_order, collapse_dims, collapse, out_dims, out, CFL_SIZE);
 
   md_free(vec);
   md_free(out);
@@ -194,6 +189,29 @@ static void E(long input_dims[WDIM], complex float* input,
 	md_calc_strides(WDIM, out_str, out_dims, CFL_SIZE);
 
 	(adj ? md_zfmacc2 : md_zfmac2)(WDIM, fmac_dims, out_str, out, input_str, input, maps_str, maps);
+}
+
+/* Shuffling temporal operator. */
+static void P(long input_dims[WDIM], complex float* input,
+              long phi_dims[WDIM],   complex float* phi, 
+              bool adj,
+              long out_dims[WDIM],   complex float* out)
+{
+	long input_str[WDIM];
+	md_calc_strides(WDIM, input_str, input_dims, CFL_SIZE);
+
+	long phi_str[WDIM];
+	md_calc_strides(WDIM, phi_str, phi_dims, CFL_SIZE);
+
+	long fmac_dims[WDIM];
+	md_merge_dims(WDIM, fmac_dims, input_dims, phi_dims);
+
+  unsigned long squash = (adj ? 32 : 64);
+	md_select_dims(WDIM, ~squash, out_dims, fmac_dims);
+	long out_str[WDIM];
+	md_calc_strides(WDIM, out_str, out_dims, CFL_SIZE);
+
+	(adj ? md_zfmacc2 : md_zfmac2)(WDIM, fmac_dims, out_str, out, input_str, input, phi_str, phi);
 }
 
 /* Resize operator. */
@@ -248,6 +266,27 @@ static void Fyz(long input_dims[WDIM], complex float* input,
   (adj ? ifftuc(WDIM, input_dims, 6, out, input) : fftuc(WDIM, input_dims, 6, out, input));
 }
 
+/* Sampling operator. */
+static void M(long input_dims[WDIM], complex float* input,
+              long mask_dims[WDIM],  complex float* mask, 
+              long out_dims[WDIM],   complex float* out)
+{
+	long input_str[WDIM];
+	md_calc_strides(WDIM, input_str, input_dims, CFL_SIZE);
+
+	long mask_str[WDIM];
+	md_calc_strides(WDIM, mask_str, mask_dims, CFL_SIZE);
+
+	long fmac_dims[WDIM];
+	md_merge_dims(WDIM, fmac_dims, input_dims, mask_dims);
+
+	md_copy_dims(WDIM, out_dims, input_dims);
+	long out_str[WDIM];
+	md_calc_strides(WDIM, out_str, out_dims, CFL_SIZE);
+
+	md_zfmac2(WDIM, fmac_dims, out_str, out, input_str, input, mask_str, mask);
+}
+
 /* Construction sampling temporal kernel. */
 static void construct_kernel(long mask_dims[WDIM], complex float* mask,
                              long phi_dims[WDIM],  complex float* phi, 
@@ -258,48 +297,41 @@ static void construct_kernel(long mask_dims[WDIM], complex float* mask,
   long tf = phi_dims[5];
   long tk = phi_dims[6];
 
-  long vec_dim[] = {1, 1, 1, 1, 1, 1, tk, 1};
-  complex float vec[tk];
+  long cvec_dims[] = {1, 1, 1, 1, 1, 1, tk, 1};
+  complex float cvec[tk];
+  md_clear(WDIM, cvec_dims, cvec, CFL_SIZE);
 
-  long mvec_dim[] = {1, 1, 1, 1, 1, tf, 1, 1};
+  long tvec_dims[] = {1, 1, 1, 1, 1, tf, 1, 1};
   complex float mvec[tf];
+  complex float tvec1[tf];
+  complex float tvec2[tf];
+
+  long out_dims[]     = {tk, sy, sz, tk, 1, 1, 1, 1};
+  complex float* out  = md_calloc(WDIM, out_dims, CFL_SIZE);
 
   for (int y = 0; y < sy; y ++) {
     for (int z = 0; z < sz; z ++) {
 
-      md_clear(1, mvec_dim, mvec, CFL_SIZE);
       for (int t = 0; t < tf; t ++)
-        mvec[t] = mask[t * (z * sy + y)];
+        mvec[t] = mask[(y + sy * z) + (sy * sz) * t];
 
       for (int t = 0; t < tk; t ++) {
-        md_clear(1,  vec_dim,  vec, CFL_SIZE);
-        vec[t] = 1; 
-
-        // Expand Phi * vec with fmac
-        // Multiply result with mvec
-        // Collapse with famc
+        cvec[t] = 1;
+        md_clear(WDIM, tvec_dims, tvec1, CFL_SIZE);
+        P(cvec_dims, cvec,  phi_dims,  phi,  false, tvec_dims, tvec1);
+        md_clear(WDIM, tvec_dims, tvec2, CFL_SIZE);
+        M(tvec_dims, tvec1, tvec_dims, mvec,        tvec_dims, tvec2);
+        P(tvec_dims, tvec2, phi_dims,  phi,  true,  cvec_dims, 
+          out + (((0 + y * tk) + z * sy * tk) + t * sy * sz * tk));
+        cvec[t] = 0;
       }
-
     }
   }
 
-	long input_str[WDIM];
-	md_calc_strides(WDIM, input_str, input_dims, CFL_SIZE);
+  unsigned int permute_order[] = {4, 1, 2, 5, 6, 7, 3, 0};
+  md_permute(WDIM, permute_order, kern_dims, kern, out_dims, out, CFL_SIZE);
 
-	long maps_str[WDIM];
-	md_calc_strides(WDIM, maps_str, maps_dims, CFL_SIZE);
-
-	long fmac_dims[WDIM];
-	md_merge_dims(WDIM, fmac_dims, input_dims, maps_dims);
-	long fmac_str[WDIM];
-	md_calc_strides(WDIM, fmac_str, fmac_dims, CFL_SIZE);
-
-  unsigned long squash = (adj ? 8 : 16);
-	md_select_dims(WDIM, ~squash, out_dims, fmac_dims);
-	long out_str[WDIM];
-	md_calc_strides(WDIM, out_str, out_dims, CFL_SIZE);
-
-	(adj ? md_zfmacc2 : md_zfmac2)(WDIM, fmac_dims, out_str, out, input_str, input, maps_str, maps);
+  md_free(out);
 }
 
 int main_wshfl(int argc, char* argv[])
@@ -358,12 +390,16 @@ int main_wshfl(int argc, char* argv[])
   int tk = phi_dims[6];
 
   long mask_dims[] = {1, sy, sz, 1, 1, tf, 1, 1};
-  complex float* mask = md_alloc(WDIM, mask_dims, CFL_SIZE);
+  complex float* mask = md_calloc(WDIM, mask_dims, CFL_SIZE);
   construct_mask(reorder_dims, reorder, mask_dims, mask);
 
   long collapse_dims[] = {wx, sy, sz, nc, 1, 1, tk, 1};
-	complex float* collapse = md_alloc(WDIM, collapse_dims, CFL_SIZE); 
+	complex float* collapse = md_calloc(WDIM, collapse_dims, CFL_SIZE); 
   collapse_table(reorder_dims, reorder, phi_dims, phi, data_dims, data, collapse_dims, collapse);
+
+  long kern_dims[] = {1, sy, sz, 1, 1, 1, tk, tk};
+	complex float* kern = md_calloc(WDIM, kern_dims, CFL_SIZE); 
+  construct_kernel(mask_dims, mask, phi_dims, phi, kern_dims, kern);
 
   long coeff_dims[] = {sx, sy, sz, 1, md, 1, tk, 1};
 
@@ -374,7 +410,18 @@ int main_wshfl(int argc, char* argv[])
     (lrthresh_create(coeff_dims, true, ~COEFF_DIM, (const long (*)[])blkdims, lambda, false, false)) :
     (prox_wavelet_thresh_create(WDIM, coeff_dims, FFT_FLAGS, 0u, minsize, lambda, false)));
 
+  // TEST SAMPLING MASK
+  /*complex float* res = create_cfl(argv[6], WDIM, mask_dims);
+  md_copy(WDIM, mask_dims, res, mask, CFL_SIZE);
+  unmap_cfl(WDIM, mask_dims, res);*/
+
+  // TEST KERNEL
+  complex float* res = create_cfl(argv[6], WDIM, kern_dims);
+  md_copy(WDIM, kern_dims, res, kern, CFL_SIZE);
+  unmap_cfl(WDIM, kern_dims, res);
+
   md_free(mask);
+  md_free(kern);
   md_free(collapse);
 
   unmap_cfl(WDIM, maps_dims,    maps);
