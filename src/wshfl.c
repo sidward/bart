@@ -46,7 +46,7 @@
 #include "wavelet/wavthresh.h"
 #include "lowrank/lrthresh.h"
 
-const int WDIM = 7;
+const int WDIM = 8;
 
 static const char usage_str[] = "<maps> <wave> <phi> <reorder> <data> <output>";
 static const char help_str[] = "Perform wave-shuffling reconstruction.\n\n"
@@ -126,7 +126,7 @@ static void collapse_table(long reorder_dims[WDIM],  complex float* reorder,
   long phi_out_dims[] = {wx * nc,  1, tk};
   long fmac_dims[]    = {wx * nc, tf, tk};
 
-  long out_dims[]     = {wx, nc, tk, sy, sz, 1, 1};
+  long out_dims[]     = {wx, nc, tk, sy, sz, 1, 1, 1};
   long copy_dim[]     = {wx * nc};
 
   complex float* vec = md_alloc(   3, vec_dims, CFL_SIZE);
@@ -162,8 +162,8 @@ static void collapse_table(long reorder_dims[WDIM],  complex float* reorder,
     }
   }
 
-  unsigned int permute_order[] = {0, 3, 4, 1, 5, 6, 2};
-  long input_dims[] = {wx, nc, tk, sy, sz, 1, 1};
+  unsigned int permute_order[] = {0, 3, 4, 1, 5, 6, 2, 7};
+  long input_dims[] = {wx, nc, tk, sy, sz, 1, 1, 1};
 
   md_permute(WDIM, permute_order, collapse_dims, collapse, input_dims, out, CFL_SIZE);
 
@@ -248,6 +248,60 @@ static void Fyz(long input_dims[WDIM], complex float* input,
   (adj ? ifftuc(WDIM, input_dims, 6, out, input) : fftuc(WDIM, input_dims, 6, out, input));
 }
 
+/* Construction sampling temporal kernel. */
+static void construct_kernel(long mask_dims[WDIM], complex float* mask,
+                             long phi_dims[WDIM],  complex float* phi, 
+                             long kern_dims[WDIM], complex float* kern)
+{
+  long sy = mask_dims[1];
+  long sz = mask_dims[2];
+  long tf = phi_dims[5];
+  long tk = phi_dims[6];
+
+  long vec_dim[] = {1, 1, 1, 1, 1, 1, tk, 1};
+  complex float vec[tk];
+
+  long mvec_dim[] = {1, 1, 1, 1, 1, tf, 1, 1};
+  complex float mvec[tf];
+
+  for (int y = 0; y < sy; y ++) {
+    for (int z = 0; z < sz; z ++) {
+
+      md_clear(1, mvec_dim, mvec, CFL_SIZE);
+      for (int t = 0; t < tf; t ++)
+        mvec[t] = mask[t * (z * sy + y)];
+
+      for (int t = 0; t < tk; t ++) {
+        md_clear(1,  vec_dim,  vec, CFL_SIZE);
+        vec[t] = 1; 
+
+        // Expand Phi * vec with fmac
+        // Multiply result with mvec
+        // Collapse with famc
+      }
+
+    }
+  }
+
+	long input_str[WDIM];
+	md_calc_strides(WDIM, input_str, input_dims, CFL_SIZE);
+
+	long maps_str[WDIM];
+	md_calc_strides(WDIM, maps_str, maps_dims, CFL_SIZE);
+
+	long fmac_dims[WDIM];
+	md_merge_dims(WDIM, fmac_dims, input_dims, maps_dims);
+	long fmac_str[WDIM];
+	md_calc_strides(WDIM, fmac_str, fmac_dims, CFL_SIZE);
+
+  unsigned long squash = (adj ? 8 : 16);
+	md_select_dims(WDIM, ~squash, out_dims, fmac_dims);
+	long out_str[WDIM];
+	md_calc_strides(WDIM, out_str, out_dims, CFL_SIZE);
+
+	(adj ? md_zfmacc2 : md_zfmac2)(WDIM, fmac_dims, out_str, out, input_str, input, maps_str, maps);
+}
+
 int main_wshfl(int argc, char* argv[])
 {
   float lambda  = 1E-6;
@@ -303,15 +357,15 @@ int main_wshfl(int argc, char* argv[])
   int tf = phi_dims[5];
   int tk = phi_dims[6];
 
-  long mask_dims[] = {1, sy, sz, 1, 1, tf, 1};
+  long mask_dims[] = {1, sy, sz, 1, 1, tf, 1, 1};
   complex float* mask = md_alloc(WDIM, mask_dims, CFL_SIZE);
   construct_mask(reorder_dims, reorder, mask_dims, mask);
 
-  long collapse_dims[] = {wx, sy, sz, nc, 1, 1, tk};
+  long collapse_dims[] = {wx, sy, sz, nc, 1, 1, tk, 1};
 	complex float* collapse = md_alloc(WDIM, collapse_dims, CFL_SIZE); 
   collapse_table(reorder_dims, reorder, phi_dims, phi, data_dims, data, collapse_dims, collapse);
 
-  long coeff_dims[] = {sx, sy, sz, 1, md, 1, tk};
+  long coeff_dims[] = {sx, sy, sz, 1, md, 1, tk, 1};
 
   long blkdims[MAX_LEV][DIMS];
   llr_blkdims(blkdims, ~COEFF_DIM, coeff_dims, blksize);
