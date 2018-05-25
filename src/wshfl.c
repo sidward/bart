@@ -334,6 +334,32 @@ static void construct_kernel(long mask_dims[WDIM], complex float* mask,
   md_free(out);
 }
 
+/* Sampling-temporal operator. */
+static void K(long input_dims[WDIM],  complex float* input,
+              long kernel_dims[WDIM], complex float* kernel, 
+              long out_dims[WDIM],    complex float* out)
+{
+	long input_str[WDIM];
+	md_calc_strides(WDIM, input_str, input_dims, CFL_SIZE);
+
+	long kernel_str[WDIM];
+	md_calc_strides(WDIM, kernel_str, kernel_dims, CFL_SIZE);
+
+	long fmac_dims[WDIM];
+	md_merge_dims(WDIM, fmac_dims, input_dims, phi_dims);
+
+  long out_dims[WDIM];
+  md_copy_dims(WDIM, out_dims, input_dims);
+  out_dims[COEFF2_DIM] = out_dims[COEFF_DIM];
+  out_dims[COEFF_DIM] = 1;
+	long out_str[WDIM];
+	md_calc_strides(WDIM, out_str, out_dims, CFL_SIZE);
+
+  md_zfmac2(WDIM, fmac_dims, out_str, out, input_str, input, kernel_str, kernel);
+  out_dims[COEFF_DIM] = out_dims[COEFF2_DIM];
+  out_dims[COEFF2_DIM] = 1;
+}
+
 int main_wshfl(int argc, char* argv[])
 {
   float lambda  = 1E-6;
@@ -410,15 +436,18 @@ int main_wshfl(int argc, char* argv[])
     (lrthresh_create(coeff_dims, true, ~COEFF_DIM, (const long (*)[])blkdims, lambda, false, false)) :
     (prox_wavelet_thresh_create(WDIM, coeff_dims, FFT_FLAGS, 0u, minsize, lambda, false)));
 
+  // TODO: Implement LINOP
+  // TODO: GPU memory
+
   // TEST SAMPLING MASK
   /*complex float* res = create_cfl(argv[6], WDIM, mask_dims);
   md_copy(WDIM, mask_dims, res, mask, CFL_SIZE);
   unmap_cfl(WDIM, mask_dims, res);*/
 
   // TEST KERNEL
-  complex float* res = create_cfl(argv[6], WDIM, kern_dims);
-  md_copy(WDIM, kern_dims, res, kern, CFL_SIZE);
-  unmap_cfl(WDIM, kern_dims, res);
+  //complex float* res = create_cfl(argv[6], WDIM, kern_dims);
+  //md_copy(WDIM, kern_dims, res, kern, CFL_SIZE);
+  //unmap_cfl(WDIM, kern_dims, res);
 
   md_free(mask);
   md_free(kern);
