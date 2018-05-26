@@ -535,6 +535,8 @@ static struct linop_s* linop_wshfl_create(long N, long D, long _coeff_dims[N],
 
 int main_wshfl(int argc, char* argv[])
 {
+	double start_time = timestamp();
+
   float lambda  = 1E-6;
   int   maxiter = 50;
   int   blksize = 8;
@@ -732,6 +734,9 @@ int main_wshfl(int argc, char* argv[])
   unmap_cfl(DIMS, coeff_dims, result);
   md_free(recon);
   debug_printf(DP_INFO, "Done.\n");
+
+	double end_time = timestamp();
+	debug_printf(DP_INFO, "Total Time: %f seconds.\n", end_time - start_time);
 
   return 0;
 }
