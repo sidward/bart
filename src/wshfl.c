@@ -410,7 +410,10 @@ static void construct_projection(long collapsed_dims[DIMS], const complex float*
   R(apply1_dims, buffer1, maps_dims[0], wave_dims[0], true, apply2_dims, buffer2);
 
   md_clear(1, flatten_dims, buffer1, CFL_SIZE);
-  E(apply2_dims, buffer2, maps_dims, maps, true, coeff_dims, out);
+  E(apply2_dims, buffer2, maps_dims, maps, true, apply1_dims, buffer1);
+
+  float n = sqrt(md_zscalar(DIMS, apply1_dims, buffer1, buffer1));
+  md_zsmul(DIMS, coeff_dims, out, buffer1, 1. / n);
 
   md_free(buffer1);
   md_free(buffer2);
@@ -434,6 +437,13 @@ struct wshfl_s {
 	const complex float* wave;
 	const complex float* kern;
 };
+
+/* To trick the solver since we're working with the normal operator. */
+static void wshfl_adj(const linop_data_t* _data, complex float* dst, const complex float* src)
+{
+	const struct wshfl_s* data = CAST_DOWN(wshfl_s, _data);
+  md_copy(data->N, data->coeff_dims, dst, src, CFL_SIZE);
+}
 
 static void wshfl_normal(const linop_data_t* _data, complex float* dst, const complex float* src)
 {
@@ -530,31 +540,35 @@ static struct linop_s* linop_wshfl_create(long N, long D, long _coeff_dims[N],
 	data->kern = kern;
 
 	return linop_create(N, _coeff_dims, N, _coeff_dims, CAST_UP(PTR_PASS(data)), 
-    wshfl_normal, wshfl_normal, wshfl_normal, NULL, wshfl_free);
+    wshfl_normal, wshfl_adj, wshfl_normal, NULL, wshfl_free);
 }
 
 int main_wshfl(int argc, char* argv[])
 {
 	double start_time = timestamp();
 
-  float lambda  = 1E-6;
+  float lambda  = 1E-7;
   int   maxiter = 50;
   int   blksize = 8;
   float step    = 0.95;
-  float tol     = 1.E-3;
+  float tol     = 1.E-2;
   bool  llr     = false;
   bool  wav     = false;
   int   gpun    = -1;
-           
+  bool  fista   = false;
+  float cont    = 1E-4;
+               
   const struct opt_s opts[] = {
     OPT_FLOAT('r', &lambda,  "lambda", "Soft threshold lambda for wavelet or locally low rank."),
     OPT_INT(  'b', &blksize, "blkdim", "Block size for locally low rank."),
     OPT_INT(  'i', &maxiter, "mxiter", "Maximum number of iterations."),
     OPT_FLOAT('s', &step,    "step",   "Step size for iterative method."),
+    OPT_FLOAT('c', &cont,    "cntnu",  "Continuation value for IST/FISTA."),
     OPT_FLOAT('t', &tol,     "tol",    "Tolerance convergence condition for iterative method."),
+    OPT_INT(  'g', &gpun,    "gpun",   "Set GPU device number. If not set, use CPU."),
+    OPT_SET(  'f', &fista,             "Reconstruct using FISTA instead of IST."),
     OPT_SET(  'w', &wav,               "Use wavelet."),
     OPT_SET(  'l', &llr,               "Use locally low rank."),
-    OPT_INT(  'g', &gpun,    "gpun",   "Set GPU device number. If not set, use CPU."),
   };
 
   cmdline(&argc, argv, 6, 6, usage_str, help_str, ARRAY_SIZE(opts), opts);
@@ -692,22 +706,36 @@ int main_wshfl(int argc, char* argv[])
 
 	struct iter_conjgrad_conf cgconf;
 	struct iter_fista_conf    fsconf;
+	struct iter_ist_conf      isconf;
 
-	if ((wav == false) &&(llr == false)) {
-    cgconf          = iter_conjgrad_defaults;
-		cgconf.maxiter  = maxiter;
-		cgconf.l2lambda = 0;
-		cgconf.tol      = 1.E-3;
-		italgo          = iter_conjgrad;
-		iconf           = CAST_UP(&cgconf);
+	if ((wav == false) && (llr == false)) {
+    cgconf              = iter_conjgrad_defaults;
+		cgconf.maxiter      = maxiter;
+		cgconf.l2lambda     = 0;
+		cgconf.tol          = tol;
+		italgo              = iter_conjgrad;
+		iconf               = CAST_UP(&cgconf);
+    debug_printf(DP_INFO, "Using conjugate gradient.\n");
+	} else if (fista) {
+		fsconf              = iter_fista_defaults;
+		fsconf.maxiter      = maxiter;
+		fsconf.step         = step;
+		fsconf.hogwild      = false;
+    fsconf.tol          = tol;
+    fsconf.continuation = cont;
+		italgo              = iter_fista;
+		iconf               = CAST_UP(&fsconf);
+    debug_printf(DP_INFO, "Using FISTA.\n");
 	} else {
-		fsconf          = iter_fista_defaults;
-		fsconf.maxiter  = maxiter;
-		fsconf.step     = step;
-		fsconf.hogwild  = false;
-		italgo          = iter_fista;
-		iconf           = CAST_UP(&fsconf);
-	}
+    isconf              = iter_ist_defaults;
+    isconf.step         = step;
+    isconf.maxiter      = maxiter;
+    isconf.tol          = tol;
+    isconf.continuation = cont;
+		italgo              = iter_ist;
+		iconf               = CAST_UP(&isconf);
+    debug_printf(DP_INFO, "Using IST.\n");
+  }
 
   debug_printf(DP_INFO, "Starting reconstruction... ");
 	complex float* recon = md_alloc_sameplace(DIMS, coeff_dims, CFL_SIZE, maps); 
