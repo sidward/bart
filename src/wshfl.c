@@ -618,7 +618,10 @@ int main_wshfl(int argc, char* argv[])
 #endif
 
   debug_printf(DP_INFO, "Constructing sampling mask from reorder table... ");
-  long mask_dims[] = {1, sy, sz, 1, 1, tf, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
+  long mask_dims[] = { [0 ... DIMS - 1] = 1 };
+  mask_dims[1] = sy;
+  mask_dims[2] = sz;
+  mask_dims[5] = tf;
   complex float* mask = md_alloc_sameplace(DIMS, mask_dims, CFL_SIZE, maps);
   construct_mask(reorder_dims, reorder, mask_dims, mask);
   debug_printf(DP_INFO, "Done.\n");
@@ -669,16 +672,16 @@ int main_wshfl(int argc, char* argv[])
   minsize[0] = MIN(sx, 16);
   minsize[1] = MIN(sy, 16);
   minsize[2] = MIN(sz, 16);
+  unsigned int WAVFLAG = (sx > 1) * READ_FLAG | (sy > 1) * PHS1_FLAG | (sz > 2) * PHS2_FLAG;
 
   if ((wav == true) || (llr == true)) {
     if (wav) {
       debug_printf(DP_INFO, "Creating wavelet threshold operator... ");
-      threshold_op = prox_wavelet_thresh_create(DIMS, coeff_dims, FFT_FLAGS, 0u, minsize, 
-        lambda, false);
+      threshold_op = prox_wavelet_thresh_create(DIMS, coeff_dims, WAVFLAG, 0u, minsize, lambda, false);
     } else {
       debug_printf(DP_INFO, "Creating locally low rank threshold operator... ");
       llr_blkdims(blkdims, ~COEFF_DIM, coeff_dims, blksize);
-      threshold_op = lrthresh_create(coeff_dims, true, ~COEFF_DIM, (const long (*)[])blkdims, 
+      threshold_op = lrthresh_create(coeff_dims, true, ~COEFF_FLAG, (const long (*)[])blkdims, 
         lambda, false, false);
     }
     debug_printf(DP_INFO, "Done.\n");
