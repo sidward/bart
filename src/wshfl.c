@@ -548,7 +548,7 @@ int main_wshfl(int argc, char* argv[])
 	double start_time = timestamp();
 
   float lambda  = 1E-7;
-  int   maxiter = 50;
+  int   maxiter = 100;
   int   blksize = 8;
   float step    = 0.95;
   float tol     = 1.E-2;
