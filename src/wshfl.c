@@ -125,8 +125,8 @@ static void collapse_table(long reorder_dims[WDIM],  complex float* reorder,
   long out_dims[]     = {wx, nc, tk, sy, sz, 1, 1, 1};
   long copy_dim[]     = {wx * nc};
 
-  complex float* vec = md_calloc(   3, vec_dims, CFL_SIZE);
-  complex float* out = md_calloc(WDIM, out_dims, CFL_SIZE);
+  complex float* vec = md_alloc_sameplace(   3, vec_dims, CFL_SIZE, collapse);
+  complex float* out = md_alloc_sameplace(WDIM, out_dims, CFL_SIZE, collapse);
 
 	long vec_str[3];
 	md_calc_strides(3, vec_str, vec_dims, CFL_SIZE);
@@ -358,13 +358,46 @@ static void K(long input_dims[WDIM],  const complex float* input,
   out_dims[COEFF2_DIM] = 1;
 }
 
+/* Convert collapsed data into projection. */
+static void construct_projection(long collapsed_dims[WDIM], const complex float* collapsed,
+                                 long maps_dims[WDIM],      const complex float* maps,
+                                 long wave_dims[WDIM],      const complex float* wave,
+                                 long coeff_dims[WDIM],           complex float* out)
+{
+  long flatten_dims[] = {collapsed_dims[0] * collapsed_dims[1] * collapsed_dims[2] *
+                         collapsed_dims[3] * collapsed_dims[6]};
+  complex float* buffer1 = md_alloc_sameplace(1, flatten_dims, CFL_SIZE, out);
+  complex float* buffer2 = md_alloc_sameplace(1, flatten_dims, CFL_SIZE, out);
+
+  long apply1_dims[] = {1, 1, 1, 1, 1, 1, 1, 1};
+  long apply2_dims[] = {1, 1, 1, 1, 1, 1, 1, 1};
+
+  md_clear(1, flatten_dims, buffer1, CFL_SIZE);
+  Fyz(collapsed_dims, collapsed, true, apply1_dims, buffer1);
+
+  md_clear(1, flatten_dims, buffer2, CFL_SIZE);
+  W(apply1_dims, buffer1, wave_dims, wave, true, apply2_dims, buffer2);
+
+  md_clear(1, flatten_dims, buffer1, CFL_SIZE);
+  Fx(apply2_dims, buffer2, true, apply1_dims, buffer1);
+
+  md_clear(1, flatten_dims, buffer2, CFL_SIZE);
+  R(apply1_dims, buffer1, maps_dims[0], wave_dims[0], true, apply2_dims, buffer2);
+
+  md_clear(1, flatten_dims, buffer1, CFL_SIZE);
+  E(apply2_dims, buffer2, maps_dims,  maps, true, coeff_dims, out);
+
+  md_free(buffer1);
+  md_free(buffer2);
+}
+
 static DEF_TYPEID(wshfl_s);
 
 struct wshfl_s {
 	INTERFACE(linop_data_t);
 
-	unsigned int N; // To index into dims
-	unsigned int D; // For buffer allocation. D = wx * sy * sz * nc * tk.
+	unsigned int N;
+	unsigned int D;
 
 	long* maps_dims;
 	long* wave_dims;
@@ -375,11 +408,6 @@ struct wshfl_s {
 	const complex float* maps;
 	const complex float* wave;
 	const complex float* kern;
-#ifdef USE_CUDA
-	const complex float* gpu_maps;
-	const complex float* gpu_wave;
-	const complex float* gpu_kern;
-#endif
 };
 
 static void wshfl_normal(const linop_data_t* _data, complex float* dst, const complex float* src)
@@ -389,21 +417,6 @@ static void wshfl_normal(const linop_data_t* _data, complex float* dst, const co
 	const complex float* maps = data->maps;
 	const complex float* wave = data->wave;
 	const complex float* kern = data->kern;
-
-#ifdef USE_CUDA
-	if (cuda_ondevice(src)) {
-
-		if (NULL == data->gpu_maps) {
-			((struct wshfl_s*) data)->gpu_maps = md_gpu_move(data->N, data->maps_dims, data->maps, CFL_SIZE);
-			((struct wshfl_s*) data)->gpu_wave = md_gpu_move(data->N, data->wave_dims, data->wave, CFL_SIZE);
-			((struct wshfl_s*) data)->gpu_kern = md_gpu_move(data->N, data->kern_dims, data->kern, CFL_SIZE);
-    }
-
-		maps = data->gpu_maps;
-		wave = data->gpu_wave;
-		kern = data->gpu_kern;
-	}
-#endif
 
   long flatten_dims[] = {data->D};
   complex float* buffer1 = md_alloc_sameplace(1, flatten_dims, CFL_SIZE, src);
@@ -453,11 +466,6 @@ static void wshfl_free(const linop_data_t* _data)
 {
 	const struct wshfl_s* data = CAST_DOWN(wshfl_s, _data);
 
-#ifdef USE_CUDA
-	md_free(data->gpu_maps);
-	md_free(data->gpu_wave);
-	md_free(data->gpu_kern);
-#endif
 	xfree(data->maps_dims);
 	xfree(data->wave_dims);
 	xfree(data->kern_dims);
@@ -493,15 +501,9 @@ static struct linop_s* linop_wshfl_create(long N, long D, long _coeff_dims[N],
 	data->wave_dims = *PTR_PASS(wave_dims);
 	data->kern_dims = *PTR_PASS(kern_dims);
 
-  // TODO: Make a copy?
 	data->maps = maps;
 	data->wave = wave;
 	data->kern = kern;
-#ifdef USE_CUDA
-	data->gpu_diag = NULL;
-	data->gpu_wave = NULL;
-	data->gpu_kern = NULL;
-#endif
 
 	return linop_create(N, _coeff_dims, N, _coeff_dims, CAST_UP(PTR_PASS(data)), 
     wshfl_normal, wshfl_normal, wshfl_normal, NULL, wshfl_free);
@@ -527,6 +529,7 @@ int main_wshfl(int argc, char* argv[])
 
   cmdline(&argc, argv, 6, 6, usage_str, help_str, ARRAY_SIZE(opts), opts);
 
+
   long maps_dims[WDIM];
   complex float* maps = load_cfl(argv[1], WDIM, maps_dims);
      
@@ -542,16 +545,15 @@ int main_wshfl(int argc, char* argv[])
   long data_dims[WDIM];
   complex float* data = load_cfl(argv[5], WDIM, data_dims);
 
-  debug_printf(DP_INFO, "Map dimensions:\n");
-  debug_print_dims(DP_INFO, WDIM, maps_dims);
-  debug_printf(DP_INFO, "Wave dimensions:\n");
-  debug_print_dims(DP_INFO, WDIM, wave_dims);
-  debug_printf(DP_INFO, "Phi dimensions:\n");
-  debug_print_dims(DP_INFO, WDIM, phi_dims);
-  debug_printf(DP_INFO, "Reorder dimensions:\n");
-  debug_print_dims(DP_INFO, WDIM, reorder_dims);
-  debug_printf(DP_INFO, "Data dimensions:\n");
-  debug_print_dims(DP_INFO, WDIM, data_dims);
+#ifdef USE_CUDA
+  complex float* tmp = maps;
+  maps = md_gpu_move(WDIM, maps_dims, tmp, CFL_SIZE);
+  unmap_cfl(WDIM, maps_dims, maps);
+
+  tmp = wave;
+  wave = md_gpu_move(WDIM, wave_dims, tmp, CFL_SIZE);
+  unmap_cfl(WDIM, wave_dims, wave);
+#endif
 
   int wx = wave_dims[0];
   int sx = maps_dims[0];
@@ -562,19 +564,32 @@ int main_wshfl(int argc, char* argv[])
   int tf = phi_dims[5];
   int tk = phi_dims[6];
 
+  long coeff_dims[] = {sx, sy, sz, 1, md, 1, tk, 1};
+
   long mask_dims[] = {1, sy, sz, 1, 1, tf, 1, 1};
-  complex float* mask = md_calloc(WDIM, mask_dims, CFL_SIZE);
+  complex float* mask = md_alloc_sameplace(WDIM, mask_dims, CFL_SIZE, maps);
   construct_mask(reorder_dims, reorder, mask_dims, mask);
 
   long collapse_dims[] = {wx, sy, sz, nc, 1, 1, tk, 1};
-	complex float* collapse = md_calloc(WDIM, collapse_dims, CFL_SIZE); 
+	complex float* collapse = md_alloc_sameplace(WDIM, collapse_dims, CFL_SIZE, maps); 
   collapse_table(reorder_dims, reorder, phi_dims, phi, data_dims, data, collapse_dims, collapse);
+  unmap_cfl(WDIM, reorder_dims, reorder);
+  unmap_cfl(WDIM, data_dims, data);
+
+	complex float* proj = md_alloc_sameplace(WDIM, coeff_dims, CFL_SIZE, maps); 
+  construct_projection(collapse_dims, collapse, maps_dims, maps, wave_dims, wave, coeff_dims, proj);
+  md_free(collapse);
 
   long kern_dims[] = {1, sy, sz, 1, 1, 1, tk, tk};
-	complex float* kern = md_calloc(WDIM, kern_dims, CFL_SIZE); 
+	complex float* kern = md_alloc_sameplace(WDIM, kern_dims, CFL_SIZE, maps); 
   construct_kernel(mask_dims, mask, phi_dims, phi, kern_dims, kern);
+  unmap_cfl(WDIM, phi_dims, phi);
+  md_free(mask);
 
-  long coeff_dims[] = {sx, sy, sz, 1, md, 1, tk, 1};
+	const struct linop_s* wshfl_op = linop_wshfl_create(WDIM, wx * sy * sz * nc * tk, coeff_dims, 
+                                          					  maps_dims, maps, 
+                                          						wave_dims, wave,
+                                          						kern_dims, kern);
 
   long blkdims[MAX_LEV][DIMS];
   llr_blkdims(blkdims, ~COEFF_DIM, coeff_dims, blksize);
@@ -583,28 +598,37 @@ int main_wshfl(int argc, char* argv[])
     (lrthresh_create(coeff_dims, true, ~COEFF_DIM, (const long (*)[])blkdims, lambda, false, false)) :
     (prox_wavelet_thresh_create(WDIM, coeff_dims, FFT_FLAGS, 0u, minsize, lambda, false)));
 
-  // TODO: Implement LINOP
-  // TODO: GPU memory
+	italgo_fun_t italgo = NULL;
+  iter_conf* iconf = NULL;
+ 
+  struct iter_fista_conf fsconf = iter_fista_defaults;
+  fsconf.maxiter = maxiter;
+  fsconf.step = step;
+  fsconf.hogwild = false;
+ 
+  italgo = iter_fista;
+  iconf = CAST_UP(&fsconf);
+ 
+	complex float* recon = md_alloc_sameplace(WDIM, coeff_dims, CFL_SIZE, maps); 
+  struct lsqr_conf lsqr_conf = { 0., false };
+  lsqr(DIMS, &lsqr_conf, italgo, iconf, wshfl_op, threshold_op, coeff_dims, recon, 
+    coeff_dims, proj, NULL); 
 
-  // TEST SAMPLING MASK
-  /*complex float* res = create_cfl(argv[6], WDIM, mask_dims);
-  md_copy(WDIM, mask_dims, res, mask, CFL_SIZE);
-  unmap_cfl(WDIM, mask_dims, res);*/
+	linop_free(wshfl_op);
 
-  // TEST KERNEL
-  //complex float* res = create_cfl(argv[6], WDIM, kern_dims);
-  //md_copy(WDIM, kern_dims, res, kern, CFL_SIZE);
-  //unmap_cfl(WDIM, kern_dims, res);
-
-  md_free(mask);
   md_free(kern);
-  md_free(collapse);
+#ifdef USE_CUDA
+  md_free(maps);
+  md_free(wave);
+#else
+  unmap_cfl(WDIM, maps_dims, maps);
+  unmap_cfl(WDIM, wave_dims, wave);
+#endif
 
-  unmap_cfl(WDIM, maps_dims,    maps);
-  unmap_cfl(WDIM, wave_dims,    wave);
-  unmap_cfl(WDIM, phi_dims,     phi);
-  unmap_cfl(WDIM, reorder_dims, reorder);
-  unmap_cfl(WDIM, data_dims,    data);
+  complex float* result = create_cfl(argv[6], WDIM, coeff_dims);
+  md_copy(WDIM, coeff_dims, result, recon, CFL_SIZE);
+  unmap_cfl(WDIM, coeff_dims, result);
+  md_free(recon);
 
   return 0;
 }
