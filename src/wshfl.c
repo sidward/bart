@@ -89,7 +89,6 @@ static void construct_mask(long reorder_dims[WDIM], complex float* reorder,
   int n  = reorder_dims[0];
   int sy = mask_dims[1];
   int sz = mask_dims[2];
-  int tf = mask_dims[5];
 
   int y = -1;
   int z = -1;
@@ -346,9 +345,8 @@ static void K(long input_dims[WDIM],  complex float* input,
 	md_calc_strides(WDIM, kernel_str, kernel_dims, CFL_SIZE);
 
 	long fmac_dims[WDIM];
-	md_merge_dims(WDIM, fmac_dims, input_dims, phi_dims);
+	md_merge_dims(WDIM, fmac_dims, input_dims, kernel_dims);
 
-  long out_dims[WDIM];
   md_copy_dims(WDIM, out_dims, input_dims);
   out_dims[COEFF2_DIM] = out_dims[COEFF_DIM];
   out_dims[COEFF_DIM] = 1;
