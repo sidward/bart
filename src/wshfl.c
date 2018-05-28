@@ -68,7 +68,8 @@ static const char help_str[] = "Perform wave-shuffling reconstruction.\n\n"
 															 "	* reorder is an (n by 3) index matrix such that\n"
 															 "		[ky, kz, t] = reorder(i, :) represents the\n"
 															 "		(ky, kz) kspace position of the readout line\n" 
-															 "		acquired at echo number (t).\n"
+															 "		acquired at echo number (t), and 0 <= ky < sy,\n"
+															 "		0 <= kz < sz, 0 <= t < tf).\n"
 															 "	* data is a (wx by nc by n) matrix such that\n"
 															 "		data(:, :, k) represents the kth multichannel\n"
 															 "		kspace line.\n\n"
@@ -547,16 +548,16 @@ int main_wshfl(int argc, char* argv[])
 {
 	double start_time = timestamp();
 
-	float lambda	= 1E-7;
-	int		maxiter = 100;
+	float lambda	= 1E-3;
+	int		maxiter = 300;
 	int		blksize = 8;
-	float step		= 0.95;
+	float step		= 0.25;
 	float tol			= 1.E-2;
 	bool	llr			= false;
 	bool	wav			= false;
 	int		gpun		= -1;
 	bool	fista		= false;
-	float cont		= 1E-4;
+	float cont		= 1;
 							 
 	const struct opt_s opts[] = {
 		OPT_FLOAT('r', &lambda,  "lambda", "Soft threshold lambda for wavelet or locally low rank."),
