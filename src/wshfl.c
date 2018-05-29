@@ -551,7 +551,7 @@ int main_wshfl(int argc, char* argv[])
 	float lambda	= 1E-3;
 	int		maxiter = 300;
 	int		blksize = 8;
-	float step		= 0.25;
+	float step		= 0.5;
 	float tol			= 1.E-2;
 	bool	llr			= false;
 	bool	wav			= false;
