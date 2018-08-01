@@ -23,6 +23,7 @@
 #include <stdbool.h>
 #include <complex.h>
 #include <math.h>
+#include <omp.h>
 
 #include "num/multind.h"
 #include "num/flpmath.h"
@@ -110,6 +111,7 @@ static void construct_mask(
 	long z = 0;
 	long t = 0;
 
+	#pragma omp parallel for
 	for (int i = 0; i < n; i++) {
 		y = lround(creal(reorder[i]));
 		z = lround(creal(reorder[i + n]));
@@ -161,7 +163,7 @@ static void kern_apply(const linop_data_t* _data, complex float* dst, const comp
 	perm_dims[3] = tk;
 	perm_dims[4] = sy;
 	perm_dims[5] = sz;
-	complex float* perm = md_alloc_sameplace(DIMS, perm_dims, CFL_SIZE, src);
+	complex float* perm = md_calloc(DIMS, perm_dims, CFL_SIZE);
 	unsigned int permute_order[DIMS] = {0, 3, 5, 6, 1, 2, 4, 7};
 	for (unsigned int i = 8; i < DIMS; i++)
 		permute_order[i] = i;
@@ -172,8 +174,6 @@ static void kern_apply(const linop_data_t* _data, complex float* dst, const comp
 	long phi_in_dims[]  = {wx, nc,  1, tk};
 	long fmac_dims[]    = {wx, nc, tf, tk};
 	long line_dims[]    = {wx, nc,  1,  1};
-
-	complex float* vec = md_alloc_sameplace(4, vec_dims, CFL_SIZE, src);
 
 	long vec_str[4];
 	md_calc_strides(4, vec_str, vec_dims, CFL_SIZE);
@@ -188,19 +188,21 @@ static void kern_apply(const linop_data_t* _data, complex float* dst, const comp
 	int z = -1;
 	int t = -1;
 
+	#pragma omp parallel for
 	for (int i = 0; i < n; i ++) {
+		complex float* vec = md_calloc(4, vec_dims, CFL_SIZE);
 
 		y = lround(creal(data->reorder[i]));
 		z = lround(creal(data->reorder[i + n]));
 		t = lround(creal(data->reorder[i + 2 * n]));
 
-		md_clear(4, vec_dims, vec, CFL_SIZE);
 		md_zfmac2(4, fmac_dims, vec_str, vec, phi_in_str, (perm + ((wx * nc * tk) * (y + z * sy))), phi_mat_str, data->phi);
 		md_copy(4, line_dims, dst + (i * wx * nc), vec + (t * wx * nc), CFL_SIZE);
+
+		md_free(vec);
 	}
 
 	md_free(perm);
-	md_free(vec);
 }
 
 /* Collapse data table into the temporal basis for memory efficiency. */
@@ -223,16 +225,13 @@ static void kern_adjoint(const linop_data_t* _data, complex float* dst, const co
 	perm_dims[4] = sy;
 	perm_dims[5] = sz;
 
-	complex float* perm = md_alloc_sameplace(DIMS, perm_dims, CFL_SIZE, dst);
-	md_clear(DIMS, perm_dims, perm, CFL_SIZE);
+	complex float* perm = md_calloc(DIMS, perm_dims, CFL_SIZE);
 
 	long vec_dims[]     = {wx, nc, tf,  1};
 	long phi_mat_dims[] = { 1,  1, tf, tk};
 	long phi_out_dims[] = {wx, nc,  1, tk};
 	long fmac_dims[]    = {wx, nc, tf, tk};
 	long line_dims[]    = {wx, nc,  1,  1};
-
-	complex float* vec = md_alloc_sameplace(4, vec_dims, CFL_SIZE, src);
 
 	long vec_str[4];
 	md_calc_strides(4, vec_str, vec_dims, CFL_SIZE);
@@ -243,22 +242,24 @@ static void kern_adjoint(const linop_data_t* _data, complex float* dst, const co
 	long fmac_str[4];
 	md_calc_strides(4, fmac_str, fmac_dims, CFL_SIZE);
 
-	int t = -1;
-	for (int y = 0; y < sy; y ++) {
-		for (int z = 0; z < sz; z ++) {
+	#pragma omp parallel for
+	for (int k = 0; k < (sy * sz); k ++) {
+		int y = k % sy;
+		int z = k / sy;
+		int t = -1;
 
-			md_clear(4, vec_dims, vec, CFL_SIZE);
+		complex float* vec = md_calloc(4, vec_dims, CFL_SIZE);
 
-			for (int i = 0; i < n; i ++) {
-				if ((y == lround(creal(data->reorder[i]))) && (z == lround(creal(data->reorder[i + n])))) {
-					t = lround(creal(data->reorder[i + 2 * n]));
-					md_copy(4, line_dims, (vec + t * wx * nc), (src + i * wx * nc), CFL_SIZE);
-				}
+		for (int i = 0; i < n; i ++) {
+			if ((y == lround(creal(data->reorder[i]))) && (z == lround(creal(data->reorder[i + n])))) {
+				t = lround(creal(data->reorder[i + 2 * n]));
+				md_copy(4, line_dims, (vec + t * wx * nc), (src + i * wx * nc), CFL_SIZE);
 			}
-
-			md_zfmacc2(4, fmac_dims, phi_out_str, perm + (y + z * sy) * (wx * nc * tk), vec_str, vec, phi_mat_str, data->phi);
-
 		}
+
+		md_zfmacc2(4, fmac_dims, phi_out_str, perm + (y + z * sy) * (wx * nc * tk), vec_str, vec, phi_mat_str, data->phi);
+
+		md_free(vec);
 	}
 
 	long out_dims[] = { [0 ... DIMS - 1] = 1 };
@@ -272,7 +273,6 @@ static void kern_adjoint(const linop_data_t* _data, complex float* dst, const co
 		permute_order[i] = i;
 	md_permute(DIMS, permute_order, out_dims, dst, perm_dims, perm, CFL_SIZE);
 
-	md_free(vec);
 	md_free(perm);
 }
 
@@ -457,16 +457,10 @@ static void construct_kernel(
 	long cvec_str[DIMS];
 	md_calc_strides(DIMS, cvec_str, cvec_dims, CFL_SIZE);
 
-	complex float cvec[tk];
-
 	long tvec_dims[] = { [0 ... DIMS - 1] = 1 };
 	tvec_dims[5] = tf;
 	long tvec_str[DIMS];
 	md_calc_strides(DIMS, tvec_str, tvec_dims, CFL_SIZE);
-
-	complex float mvec[tf];
-	complex float tvec1[tf];
-	complex float tvec2[tf];
 
 	long phi_str[DIMS];
 	md_calc_strides(DIMS, phi_str, phi_dims, CFL_SIZE);
@@ -478,27 +472,34 @@ static void construct_kernel(
 	out_dims[3] = tk;
 	complex float* out = md_calloc(DIMS, out_dims, CFL_SIZE);
 
-	for (int y = 0; y < sy; y ++) {
-		for (int z = 0; z < sz; z ++) {
+	#pragma omp parallel for
+	for (int i = 0; i < (sy * sz); i ++) {
 
-			for (int t = 0; t < tf; t ++)
-				mvec[t] = mask[(y + sy * z) + (sy * sz) * t];
+		complex float cvec[tk];
+		complex float mvec[tf];
+		complex float tvec1[tf];
+		complex float tvec2[tf];
 
-			for (int t = 0; t < tk; t ++) {
-				cvec[t] = 1;
+		int y = i % sy;
+		int z = i / sy;
+		
+		for (int t = 0; t < tf; t ++)
+			mvec[t] = mask[(y + sy * z) + (sy * sz) * t];
 
-				md_clear(DIMS, tvec_dims, tvec1, CFL_SIZE);
-				md_zfmac2(DIMS, phi_dims, tvec_str, tvec1, cvec_str, cvec, phi_str, phi);
+		for (int t = 0; t < tk; t ++) {
+			cvec[t] = 1;
 
-				md_clear(DIMS, tvec_dims, tvec2, CFL_SIZE);
-				md_zfmac2(DIMS, tvec_dims, tvec_str, tvec2, tvec_str, tvec1, tvec_str, mvec);
+			md_clear(DIMS, tvec_dims, tvec1, CFL_SIZE);
+			md_zfmac2(DIMS, phi_dims, tvec_str, tvec1, cvec_str, cvec, phi_str, phi);
 
-				md_clear(DIMS, cvec_dims, out + y * tk + z * sy * tk + t * sy * sz * tk, CFL_SIZE);
-				md_zfmacc2(DIMS, phi_dims, cvec_str, out + y * tk + z * sy * tk + t * sy * sz * tk,
+			md_clear(DIMS, tvec_dims, tvec2, CFL_SIZE);
+			md_zfmac2(DIMS, tvec_dims, tvec_str, tvec2, tvec_str, tvec1, tvec_str, mvec);
+
+			md_clear(DIMS, cvec_dims, out + y * tk + z * sy * tk + t * sy * sz * tk, CFL_SIZE);
+			md_zfmacc2(DIMS, phi_dims, cvec_str, out + y * tk + z * sy * tk + t * sy * sz * tk,
 				tvec_str, tvec2, phi_str, phi);
 
-				cvec[t] = 0;
-			}
+			cvec[t] = 0;
 		}
 	}
 
@@ -535,6 +536,8 @@ static void fftmod_apply(long sy, long sz,
 	dims[1] = nc;
 
 	long n = reorder_dims[0];
+
+	#pragma omp parallel for
 	for (long k = 0; k < n; k++) {
 		y = lround(creal(reorder[k]));
 		z = lround(creal(reorder[k + n]));
