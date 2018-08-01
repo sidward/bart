@@ -562,6 +562,7 @@ int main_wshfl(int argc, char* argv[])
 	bool  fista     = false;
 	bool  hgwld     = false;
 	float cont      = 1;
+	float eval      = -1;
 	const char* fwd = NULL;
 
 	const struct opt_s opts[] = {
@@ -571,6 +572,7 @@ int main_wshfl(int argc, char* argv[])
 		OPT_FLOAT( 's', &step,    "stepsz", "Step size for iterative method."),
 		OPT_FLOAT( 'c', &cont,    "cntnu",  "Continuation value for IST/FISTA."),
 		OPT_FLOAT( 't', &tol,     "toler",  "Tolerance convergence condition for iterative method."),
+		OPT_FLOAT( 'e', &eval,    "eigvl",  "Maximum eigenvalue of normal operator, if known."),
 		OPT_STRING('F', &fwd,     "frwrd",  "Go from shfl-coeffs to data-table. Pass in coeffs path."),
 		OPT_SET(   'f', &fista,             "Reconstruct using FISTA instead of IST."),
 		OPT_SET(   'H', &hgwld,             "Use hogwild in IST/FISTA."),
@@ -667,9 +669,10 @@ int main_wshfl(int argc, char* argv[])
 		return 0;
 	}
 
-	double maxeigen = estimate_maxeigenval(A->normal);
-	debug_printf(DP_INFO, "\tMax eval: %.2e\n", maxeigen);
-	step /= maxeigen;
+	if (eval < 0)	
+		eval = estimate_maxeigenval(A->normal);
+	debug_printf(DP_INFO, "\tMax eval: %.2e\n", eval);
+	step /= eval;
 
 	debug_printf(DP_INFO, "Normalizing data table and applying fftmod to table... ");
 	float norm = md_znorm(DIMS, table_dims, table);
