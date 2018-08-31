@@ -38,7 +38,7 @@
 #include "linops/linop.h"
 #include "linops/fmac.h"
 #include "linops/someops.h"
-#include "sense/model.h"
+#include "linops/realval.h"
 
 #include "misc/debug.h"
 #include "misc/mri.h"
@@ -561,6 +561,7 @@ int main_wshfl(int argc, char* argv[])
 	bool  wav       = false;
 	bool  fista     = false;
 	bool  hgwld     = false;
+	bool  rvc       = false;
 	float cont      = 1;
 	float eval      = -1;
 	const char* fwd = NULL;
@@ -576,6 +577,7 @@ int main_wshfl(int argc, char* argv[])
 		OPT_STRING('F', &fwd,     "frwrd",  "Go from shfl-coeffs to data-table. Pass in coeffs path."),
 		OPT_SET(   'f', &fista,             "Reconstruct using FISTA instead of IST."),
 		OPT_SET(   'H', &hgwld,             "Use hogwild in IST/FISTA."),
+		OPT_SET(   'v', &rvc,               "Apply real valued constraint on coefficients."),
 		OPT_SET(   'w', &wav,               "Use wavelet."),
 		OPT_SET(   'l', &llr,               "Use locally low rank."),
 	};
@@ -649,6 +651,16 @@ int main_wshfl(int argc, char* argv[])
 
 	struct linop_s* A = linop_chain(linop_chain(linop_chain(linop_chain(linop_chain(
 		E, R), Fx), W), Fyz), K);
+
+	if (rvc == true) {
+		struct linop_s* tmp = A;
+		struct linop_s* rvcop = linop_realval_create(DIMS, linop_domain(A)->dims);
+
+		A = linop_chain(rvcop, tmp);
+
+		linop_free(rvcop);
+		linop_free(tmp);
+	}
 
 	linop_free(E);
 	linop_free(R);
