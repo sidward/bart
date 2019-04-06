@@ -435,12 +435,11 @@ static const struct linop_s* linop_kern_create(bool gpu_flag,
 	output_dims[1] = _table_dims[1];
 	output_dims[2] = _reorder_dims[0];
 
-	const struct linop_s* K = linop_create(DIMS, output_dims, DIMS, input_dims, CAST_UP(PTR_PASS(data)), kern_apply, kern_adjoint, kern_normal, NULL, kern_free);
-	return K;
+	return linop_create(DIMS, output_dims, DIMS, input_dims, CAST_UP(PTR_PASS(data)), kern_apply, kern_adjoint, kern_normal, NULL, kern_free);
 }
 
 /* ESPIRiT operator. */
-static const struct linop_s* linop_espirit_create(long sx, long sy, long sz, long nc, long md, long tk, complex float* maps)
+static const struct linop_s* linop_espirit_create(long sx, long sy, long sz, long nc, long md, long tk, bool jc, complex float* maps)
 {
 	long max_dims[] = { [0 ... DIMS - 1] = 1};
 	max_dims[0] = sx;
@@ -450,9 +449,9 @@ static const struct linop_s* linop_espirit_create(long sx, long sy, long sz, lon
 	max_dims[4] = md;
 	max_dims[6] = tk;
 
-	const struct linop_s* E = linop_fmac_create(DIMS, max_dims, MAPS_FLAG, COIL_FLAG, TE_FLAG|COEFF_FLAG, maps);
- 
-	return E;
+	if (jc)
+		return linop_fmac_create(DIMS, max_dims, MAPS_FLAG, COIL_FLAG, TE_FLAG, maps);
+	return linop_fmac_create(DIMS, max_dims, MAPS_FLAG, COIL_FLAG, TE_FLAG | COEFF_FLAG, maps);
 }
 
 /* Resize operator. */
@@ -467,8 +466,7 @@ static const struct linop_s* linop_reshape_create(long wx, long sx, long sy, lon
 	long output_dims[DIMS];
 	md_copy_dims(DIMS, output_dims, input_dims);
 	output_dims[0] = wx;
-	struct linop_s* R = linop_resize_create(DIMS, output_dims, input_dims);
-	return R;
+	return linop_resize_create(DIMS, output_dims, input_dims);
 }
 
 /* Fx operator. */
@@ -480,16 +478,13 @@ static const struct linop_s* linop_fx_create(long wx, long sy, long sz, long nc,
 	dims[2] = sz;
 	dims[3] = nc;
 	dims[6] = tk;
-	struct linop_s* Fx = NULL;
 	if (centered)
-		Fx = linop_fftc_create(DIMS, dims, READ_FLAG);
-	else
-		Fx = linop_fft_create(DIMS, dims, READ_FLAG);
-	return Fx;
+		return linop_fftc_create(DIMS, dims, READ_FLAG);
+	return linop_fft_create(DIMS, dims, READ_FLAG);
 }
 
 /* Wave operator. */
-static const struct linop_s* linop_wave_create(long wx, long sy, long sz, long nc, long tk, complex float* psf)
+static const struct linop_s* linop_wave_create(long wx, long sy, long sz, long nc, long tk, bool jc, complex float* psf)
 {
 	long dims[] = { [0 ... DIMS - 1] = 1};
 	dims[0] = wx;
@@ -497,8 +492,9 @@ static const struct linop_s* linop_wave_create(long wx, long sy, long sz, long n
 	dims[2] = sz;
 	dims[3] = nc;
 	dims[6] = tk;
-	struct linop_s* W = linop_cdiag_create(DIMS, dims, FFT_FLAGS, psf);
-	return W;
+	if (jc)
+		return linop_cdiag_create(DIMS, dims, FFT_FLAGS | COEFF_FLAG, psf);
+	return linop_cdiag_create(DIMS, dims, FFT_FLAGS, psf);
 }
 
 /* Fyz operator. */
@@ -703,6 +699,9 @@ int main_wshfl(int argc, char* argv[])
 	int tf = phi_dims[5];
 	int tk = phi_dims[6];
 
+	bool jc = (maps_dims[COEFF_DIM] > 1);
+	assert(maps_dims[COEFF_DIM] == wave_dims[COEFF_DIM]);
+
 	debug_printf(DP_INFO, "Constructing sampling mask from reorder table... ");
 	long mask_dims[] = { [0 ... DIMS - 1] = 1 };
 	mask_dims[1] = sy;
@@ -737,7 +736,7 @@ int main_wshfl(int argc, char* argv[])
 	double t2;
 
 	t1 = timestamp();
-	const struct linop_s* E = linop_espirit_create(sx, sy, sz, nc, md, tk, maps);
+	const struct linop_s* E = linop_espirit_create(sx, sy, sz, nc, md, tk, jc, maps);
 	t2 = timestamp();
 	debug_printf(DP_INFO, "\tE:   %f seconds.\n", t2 - t1);
 
@@ -752,7 +751,7 @@ int main_wshfl(int argc, char* argv[])
 	debug_printf(DP_INFO, "\tFx:  %f seconds.\n", t2 - t1);
 
 	t1 = timestamp();
-	const struct linop_s* W = linop_wave_create(wx, sy, sz, nc, tk, wave);
+	const struct linop_s* W = linop_wave_create(wx, sy, sz, nc, tk, jc, wave);
 	t2 = timestamp();
 	debug_printf(DP_INFO, "\tW:   %f seconds.\n", t2 - t1);
 
