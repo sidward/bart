@@ -466,6 +466,8 @@ static void jointcontrast_free(const linop_data_t* _data)
 	xfree(data->coeff_dims);
 	xfree(data->jccoeff_dims);
 	xfree(data->jc_dims);
+	xfree(data->apply_pos);
+	xfree(data->adjoint_pos);
 
 #ifdef USE_CUDA
 	if (data->gpu_jc != NULL)
@@ -504,10 +506,11 @@ static struct linop_s* linop_jointcontrast_create(bool gpu_flag,
 	md_copy_dims(DIMS, *apply_pos,    _apply_pos);
 	md_copy_dims(DIMS, *adjoint_pos,  _adjoint_pos);
 
-	data->jc_dims     = *PTR_PASS(jc_dims);
-	data->coeff_dims  = *PTR_PASS(coeff_dims);
-	data->apply_pos   = *PTR_PASS(apply_pos);
-	data->adjoint_pos = *PTR_PASS(adjoint_pos);
+	data->jc_dims      = *PTR_PASS(jc_dims);
+	data->coeff_dims   = *PTR_PASS(coeff_dims);
+	data->jccoeff_dims = *PTR_PASS(jccoeff_dims);
+	data->apply_pos    = *PTR_PASS(apply_pos);
+	data->adjoint_pos  = *PTR_PASS(adjoint_pos);
 
 	data->jc     = jc;
 	data->gpu_jc = NULL;
@@ -777,7 +780,7 @@ int main_wshfl(int argc, char* argv[])
 	complex float* table = load_cfl(argv[5], DIMS, table_dims);
 
 	long joint_dims[DIMS];
-	complex float* joint = NULL;
+	complex float* joint = (jc == NULL) ? NULL : load_cfl(jc, DIMS, joint_dims);
 
 	debug_printf(DP_INFO, "Done.\n");
 
@@ -889,19 +892,17 @@ int main_wshfl(int argc, char* argv[])
 	struct linop_s* A = linop_chain_FF(linop_chain_FF(linop_chain_FF(linop_chain_FF(linop_chain_FF(
 		E, R), Fx), W), Fyz), K);
 
-	struct linop_s* tmp = NULL;
-
-	if (jc != NULL) {
-		debug_printf(DP_INFO, "\tAdding joint-contrast operator.\n");
-		joint = load_cfl(jc, DIMS, joint_dims);
-		tmp = A;
+	if (joint) {
+		debug_printf(DP_INFO, "\tAdding joint-contrast.\n");
+		assert(!dcx);
+		struct linop_s* tmp = A;
 		struct linop_s* jcop = linop_jointcontrast_create(gpun >= 0, joint_dims, joint, coeff_dims);
 		A = linop_chain_FF(jcop, tmp);
 	}
 
 	if (dcx) {
 		debug_printf(DP_INFO, "\tSplitting result into real and imaginary components.\n");
-		tmp = A;
+		struct linop_s* tmp = A;
 		struct linop_s* dcxop = linop_decompose_complex_create(DIMS, ITER_DIM, linop_domain(A)->dims);
 		A = linop_chain_FF(dcxop, tmp);
 	}
@@ -1033,6 +1034,8 @@ int main_wshfl(int argc, char* argv[])
 	}
 
 	debug_printf(DP_INFO, "Reconstruction... ");
+	if (joint)
+		coeff_dims[COEFF_DIM] += joint_dims[COEFF_DIM];
 	complex float* recon = create_cfl(argv[6], DIMS, coeff_dims);
 	struct lsqr_conf lsqr_conf = { 0., gpun >= 0 };
 	double recon_start = timestamp();
@@ -1051,10 +1054,14 @@ int main_wshfl(int argc, char* argv[])
 	unmap_cfl(DIMS, reorder_dims, reorder);
 	unmap_cfl(DIMS, table_dims, table);
 	unmap_cfl(DIMS, coeff_dims, recon);
-	if (x0 != NULL)
+	if (x0 != NULL) {
 		unmap_cfl(DIMS, coeff_dims, init);
-	if (joint != NULL)
+		xfree(x0);
+	}
+	if (joint != NULL) {
 		unmap_cfl(DIMS, joint_dims, joint);
+		xfree(jc);
+	}
 	debug_printf(DP_INFO, "Done.\n");
 
 	double end_time = timestamp();
