@@ -257,27 +257,33 @@ static void kern_adjoint(const linop_data_t* _data, complex float* dst, const co
 	long fmac_str[4];
 	md_calc_strides(4, fmac_str, fmac_dims, CFL_SIZE);
 
+	long flag_dims[1] = { n };
+	complex float* flags = md_calloc(1, flag_dims, CFL_SIZE);
+
 	#pragma omp parallel for
-	for (int k = 0; k < sy * sz; k ++) {
+	for (int k = 0; k < n; k ++) {
 #ifdef _OPENMP
 		int tid = omp_get_thread_num();
 #else
 		int tid = 0;
 #endif
-		int y = k % sy;
-		int z = k / sy;
+		int y = lround(creal(data->reorder[k]));
+		int z = lround(creal(data->reorder[k + n]));
 		int t = -1;
 
-		md_clear(4, vec_dims, vec + (wx * nc * tf * tid), CFL_SIZE);
+		if (0 == flags[k]) {
+			md_clear(4, vec_dims, vec + (wx * nc * tf * tid), CFL_SIZE);
 
-		for (int i = 0; i < n; i ++) {
-			if ((y == lround(creal(data->reorder[i]))) && (z == lround(creal(data->reorder[i + n])))) {
-				t = lround(creal(data->reorder[i + 2 * n]));
-				md_copy(4, line_dims, (vec + (wx * nc * tf * tid) + t * wx * nc), (src + i * wx * nc), CFL_SIZE);
+			for (int i = k; i < n; i ++) {
+				if ((y == lround(creal(data->reorder[i]))) && (z == lround(creal(data->reorder[i + n])))) {
+					flags[i] = 1;
+					t = lround(creal(data->reorder[i + 2 * n]));
+					md_copy(4, line_dims, (vec + (wx * nc * tf * tid) + t * wx * nc), (src + i * wx * nc), CFL_SIZE);
+				}
 			}
-		}
 
-		md_zfmacc2(4, fmac_dims, phi_out_str, perm + (y + z * sy) * (wx * nc * tk), vec_str, vec + (wx * nc * tf * tid), phi_mat_str, data->phi);
+			md_zfmacc2(4, fmac_dims, phi_out_str, perm + (y + z * sy) * (wx * nc * tk), vec_str, vec + (wx * nc * tf * tid), phi_mat_str, data->phi);
+		}
 	}
 
 	long out_dims[] = { [0 ... DIMS - 1] = 1 };
@@ -293,6 +299,7 @@ static void kern_adjoint(const linop_data_t* _data, complex float* dst, const co
 
 	md_free(vec);
 	md_free(perm);
+	md_free(flags);
 }
 
 static void kern_normal(const linop_data_t* _data, complex float* dst, const complex float* src)
@@ -452,13 +459,18 @@ static void jointcontrast_apply(const linop_data_t* _data, complex float* dst, c
 static void jointcontrast_adjoint(const linop_data_t* _data, complex float* dst, const complex float* src)
 {
 	const struct jointcontrast_s* data = CAST_DOWN(jointcontrast_s, _data);
+
+	float src_norm = md_znorm(DIMS, data->coeff_dims, src);
+	float jc_norm  = md_znorm(DIMS, data->jc_dims,    data->jc);
+	md_zsmul(data->N, data->jc_dims, data->jc, data->jc, src_norm/jc_norm);
+
 	long ofs = md_calc_size(data->N, data->coeff_dims);
 	if (NULL != data->gpu_jc) {
 		md_copy(data->N, data->coeff_dims, dst, src, CFL_SIZE);
 		md_copy(data->N, data->jc_dims, dst + ofs, data->gpu_jc, CFL_SIZE);
 	} else {
-		md_copy(data->N, data->coeff_dims, dst, src, CFL_SIZE);
-		md_copy(data->N, data->jc_dims, dst + ofs, data->jc, CFL_SIZE);
+		md_copy(data->N, data->coeff_dims, dst,       src,      CFL_SIZE);
+	  md_copy(data->N, data->jc_dims,    dst + ofs, data->jc, CFL_SIZE);
 	}
 }
 
@@ -489,11 +501,11 @@ static struct linop_s* linop_jointcontrast_create(bool gpu_flag,
 	PTR_ALLOC(long[DIMS], jc_dims);
 	PTR_ALLOC(long[DIMS], coeff_dims);
 
-	md_copy_dims(DIMS, *jc_dims,      _jc_dims);
-	md_copy_dims(DIMS, *coeff_dims,   _coeff_dims);
+	md_copy_dims(DIMS, *jc_dims,    _jc_dims);
+	md_copy_dims(DIMS, *coeff_dims, _coeff_dims);
 
-	data->jc_dims      = *PTR_PASS(jc_dims);
-	data->coeff_dims   = *PTR_PASS(coeff_dims);
+	data->jc_dims    = *PTR_PASS(jc_dims);
+	data->coeff_dims = *PTR_PASS(coeff_dims);
 
 	data->jc     = jc;
 	data->gpu_jc = NULL;
@@ -1012,22 +1024,24 @@ int main_wshfl(int argc, char* argv[])
 
 	}
 
+	long recon_dims[] = { [0 ... DIMS - 1] = 1 };
+	md_copy_dims(DIMS, recon_dims, coeff_dims);
 	if (joint)
-		coeff_dims[COEFF_DIM] += joint_dims[COEFF_DIM];
+		recon_dims[COEFF_DIM] += joint_dims[COEFF_DIM];
 
 	complex float* init = NULL;
 	if (x0 != NULL) {
 		debug_printf(DP_INFO, "Loading in initial guess... ");
-		init = load_cfl(x0, DIMS, coeff_dims);
+		init = load_cfl(x0, DIMS, recon_dims);
 		debug_printf(DP_INFO, "Done.\n");
 	}
 
 	debug_printf(DP_INFO, "Reconstruction... ");
-	complex float* recon = create_cfl(argv[6], DIMS, coeff_dims);
+	complex float* recon = create_cfl(argv[6], DIMS, recon_dims);
 	struct lsqr_conf lsqr_conf = { 0., gpun >= 0 };
 	double recon_start = timestamp();
 	const struct operator_s* J = lsqr2_create(&lsqr_conf, italgo, iconf, (const float*) init, A, NULL, 1, &T, NULL, NULL);
-	operator_apply(J, DIMS, coeff_dims, recon, DIMS, table_dims, table);
+	operator_apply(J, DIMS, recon_dims, recon, DIMS, table_dims, table);
 	double recon_end = timestamp();
 	debug_printf(DP_INFO, "Done.\nReconstruction time: %f seconds.\n", recon_end - recon_start);
 
@@ -1040,9 +1054,9 @@ int main_wshfl(int argc, char* argv[])
 	unmap_cfl(DIMS, phi_dims, phi);
 	unmap_cfl(DIMS, reorder_dims, reorder);
 	unmap_cfl(DIMS, table_dims, table);
-	unmap_cfl(DIMS, coeff_dims, recon);
+	unmap_cfl(DIMS, recon_dims, recon);
 	if (x0 != NULL) {
-		unmap_cfl(DIMS, coeff_dims, init);
+		unmap_cfl(DIMS, recon_dims, init);
 		xfree(x0);
 	}
 	if (joint != NULL) {
