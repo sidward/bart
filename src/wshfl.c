@@ -438,25 +438,28 @@ struct jointcontrast_s {
 	INTERFACE(linop_data_t);
 	unsigned int N;
 	long* coeff_dims;
-	long* jccoeff_dims;
 	long* jc_dims;
 	complex float* jc;
 	complex float* gpu_jc;
-	long* apply_pos;
-	long* adjoint_pos;
 };
 
 static void jointcontrast_apply(const linop_data_t* _data, complex float* dst, const complex float* src)
 {
 	const struct jointcontrast_s* data = CAST_DOWN(jointcontrast_s, _data);
-	md_copy_block(data->N, data->apply_pos, data->coeff_dims, dst, data->jccoeff_dims, src, CFL_SIZE);
+	md_copy(data->N, data->coeff_dims, dst, src, CFL_SIZE);
 }
 
 static void jointcontrast_adjoint(const linop_data_t* _data, complex float* dst, const complex float* src)
 {
 	const struct jointcontrast_s* data = CAST_DOWN(jointcontrast_s, _data);
-	md_copy_block(data->N, data->apply_pos,   data->jccoeff_dims, dst, data->coeff_dims, src,      CFL_SIZE);
-	md_copy_block(data->N, data->adjoint_pos, data->jccoeff_dims, dst, data->jc_dims,    data->jc, CFL_SIZE);
+	long ofs = md_calc_size(data->N, data->coeff_dims);
+	if (NULL != data->gpu_jc) {
+		md_copy(data->N, data->coeff_dims, dst, src, CFL_SIZE);
+		md_copy(data->N, data->jc_dims, dst + ofs, data->gpu_jc, CFL_SIZE);
+	} else {
+		md_copy(data->N, data->coeff_dims, dst, src, CFL_SIZE);
+		md_copy(data->N, data->jc_dims, dst + ofs, data->jc, CFL_SIZE);
+	}
 }
 
 static void jointcontrast_free(const linop_data_t* _data)
@@ -464,10 +467,7 @@ static void jointcontrast_free(const linop_data_t* _data)
 	struct jointcontrast_s* data = CAST_DOWN(jointcontrast_s, _data);
 
 	xfree(data->coeff_dims);
-	xfree(data->jccoeff_dims);
 	xfree(data->jc_dims);
-	xfree(data->apply_pos);
-	xfree(data->adjoint_pos);
 
 #ifdef USE_CUDA
 	if (data->gpu_jc != NULL)
@@ -488,29 +488,12 @@ static struct linop_s* linop_jointcontrast_create(bool gpu_flag,
 
 	PTR_ALLOC(long[DIMS], jc_dims);
 	PTR_ALLOC(long[DIMS], coeff_dims);
-	PTR_ALLOC(long[DIMS], jccoeff_dims);
-	PTR_ALLOC(long[DIMS], apply_pos);
-	PTR_ALLOC(long[DIMS], adjoint_pos);
-
-	long _apply_pos[DIMS]    = { [0 ... DIMS - 1] = 0};
-	long _adjoint_pos[DIMS]  = { [0 ... DIMS - 1] = 0};
-	long _jccoeff_dims[DIMS] = { [0 ... DIMS - 1] = 0};
-
-	_adjoint_pos[COEFF_DIM] = _coeff_dims[COEFF_DIM] + 1;
-	md_copy_dims(DIMS, _jccoeff_dims, _coeff_dims);
-	_jccoeff_dims[COEFF_DIM] += _jc_dims[COEFF_DIM]; 
 
 	md_copy_dims(DIMS, *jc_dims,      _jc_dims);
 	md_copy_dims(DIMS, *coeff_dims,   _coeff_dims);
-	md_copy_dims(DIMS, *jccoeff_dims, _jccoeff_dims);
-	md_copy_dims(DIMS, *apply_pos,    _apply_pos);
-	md_copy_dims(DIMS, *adjoint_pos,  _adjoint_pos);
 
 	data->jc_dims      = *PTR_PASS(jc_dims);
 	data->coeff_dims   = *PTR_PASS(coeff_dims);
-	data->jccoeff_dims = *PTR_PASS(jccoeff_dims);
-	data->apply_pos    = *PTR_PASS(apply_pos);
-	data->adjoint_pos  = *PTR_PASS(adjoint_pos);
 
 	data->jc     = jc;
 	data->gpu_jc = NULL;
@@ -892,6 +875,9 @@ int main_wshfl(int argc, char* argv[])
 	struct linop_s* A = linop_chain_FF(linop_chain_FF(linop_chain_FF(linop_chain_FF(linop_chain_FF(
 		E, R), Fx), W), Fyz), K);
 
+  if (joint || dcx)
+		debug_printf(DP_INFO, "Miscellaneous:\n");
+
 	if (joint) {
 		debug_printf(DP_INFO, "\tAdding joint-contrast.\n");
 		assert(!dcx);
@@ -1026,6 +1012,9 @@ int main_wshfl(int argc, char* argv[])
 
 	}
 
+	if (joint)
+		coeff_dims[COEFF_DIM] += joint_dims[COEFF_DIM];
+
 	complex float* init = NULL;
 	if (x0 != NULL) {
 		debug_printf(DP_INFO, "Loading in initial guess... ");
@@ -1034,8 +1023,6 @@ int main_wshfl(int argc, char* argv[])
 	}
 
 	debug_printf(DP_INFO, "Reconstruction... ");
-	if (joint)
-		coeff_dims[COEFF_DIM] += joint_dims[COEFF_DIM];
 	complex float* recon = create_cfl(argv[6], DIMS, coeff_dims);
 	struct lsqr_conf lsqr_conf = { 0., gpun >= 0 };
 	double recon_start = timestamp();
