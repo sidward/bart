@@ -103,7 +103,7 @@ static void print_opdims(const struct linop_s* op)
 }
 
 /* Construct sampling mask array from reorder tables. */
-static void construct_mask(
+static void construct_mask(bool alias,
 	long reorder_dims[DIMS], complex float* reorder, 
 	long mask_dims[DIMS],    complex float* mask)
 {
@@ -119,7 +119,10 @@ static void construct_mask(
 		y = lround(creal(reorder[i]));
 		z = lround(creal(reorder[i + n]));
 		t = lround(creal(reorder[i + 2 * n]));
-		mask[(y + z * sy) + t * sy * sz] = 1;
+		if (alias)
+			mask[y + z * sy] = 1;
+		else
+			mask[(y + z * sy) + t * sy * sz] = 1;
 	}
 }
 
@@ -129,11 +132,16 @@ struct kern_s {
 	INTERFACE(linop_data_t);
 
 	unsigned int N;
+	unsigned int K;
+	bool alias;
 
 	long* reorder_dims; // Dimension of the index table:    ( n,  3,  1,  1, 1,  1,  1,  1)
 	long* phi_dims;     // Dimension of the temporal basis: ( 1,  1,  1,  1, 1, tf, tk,  1)
 	long* table_dims;   // Dimension of the data table:     (wx, nc,  n,  1, 1,  1,  1,  1)
 	long* kernel_dims;  // Dimension of the kernel:         ( 1, sy, sz,  1, 1,  1, tk, tk)
+
+	long* alias_ylocs;  // Y-locations for alias circ-shift.
+	long* alias_zlocs;  // Z-locations for alias circ-shift.
 
 	complex float* reorder;
 	complex float* phi;
@@ -172,7 +180,14 @@ static void kern_apply(const linop_data_t* _data, complex float* dst, const comp
 	unsigned int permute_order[DIMS] = {0, 3, 5, 6, 1, 2, 4, 7};
 	for (unsigned int i = 8; i < DIMS; i++)
 		permute_order[i] = i;
-	md_permute(DIMS, permute_order, perm_dims, perm, input_dims, src, CFL_SIZE);
+	if (data->alias) {
+		complex float* buffer = md_alloc_sameplace(DIMS, input_dims, CFL_SIZE, src);
+		fft(DIMS, input_dims, PHS1_FLAG|PHS2_FLAG, buffer, src);
+		md_permute(DIMS, permute_order, perm_dims, perm, input_dims, buffer, CFL_SIZE);
+		md_free(buffer);
+	} else {
+		md_permute(DIMS, permute_order, perm_dims, perm, input_dims, src, CFL_SIZE);
+	}
 
 	long vec_dims[]     = {wx, nc, tf,  1};
 	long phi_mat_dims[] = { 1,  1, tf, tk};
@@ -297,6 +312,9 @@ static void kern_adjoint(const linop_data_t* _data, complex float* dst, const co
 		permute_order[i] = i;
 	md_permute(DIMS, permute_order, out_dims, dst, perm_dims, perm, CFL_SIZE);
 
+	if (data->alias)
+		ifft(DIMS, out_dims, PHS1_FLAG|PHS2_FLAG, dst, dst);
+
 	md_free(vec);
 	md_free(perm);
 	md_free(flags);
@@ -351,6 +369,40 @@ static void kern_normal(const linop_data_t* _data, complex float* dst, const com
 		md_zfmac2(DIMS, fmac_dims, output_str, dst, input_str, src, kernel_str, data->kernel);
 }
 
+static void kern_normal_alias(const linop_data_t* _data, complex float* dst, const complex float* src)
+{
+	const struct kern_s* data = CAST_DOWN(kern_s, _data);
+
+	long wx = data->table_dims[0];
+	long sy = data->kernel_dims[1];
+	long sz = data->kernel_dims[2];
+	long nc = data->table_dims[1];
+	long tk = data->phi_dims[6];
+
+	long dims[DIMS] = { [0 ... DIMS - 1] = 1 };
+	dims[0] = wx;
+	dims[1] = sy;
+	dims[2] = sz;
+	dims[3] = nc;
+	dims[6] = tk;
+
+	long center[DIMS] = { [0 ... DIMS - 1] = 0};
+	complex float* buffer = md_alloc_sameplace(DIMS, dims, CFL_SIZE, src);
+	md_clear(DIMS, dims, dst, CFL_SIZE);
+
+	for (long k = 0; k < data->K; k++) {
+		md_clear(DIMS, dims, buffer, CFL_SIZE);
+		center[1] = data->alias_ylocs[k];
+		center[2] = data->alias_zlocs[k];
+		md_circ_shift(DIMS, dims, center, buffer, src, CFL_SIZE);
+		md_zadd(DIMS, dims, dst, dst, buffer);
+	}
+
+	md_zsmul(DIMS, dims, dst, dst, 1.0/sqrt(data->K));
+
+	md_free(buffer);
+}
+
 static void kern_free(const linop_data_t* _data)
 {
 	const struct kern_s* data = CAST_DOWN(kern_s, _data);
@@ -360,6 +412,11 @@ static void kern_free(const linop_data_t* _data)
 	xfree(data->table_dims);
 	xfree(data->kernel_dims);
 
+	if (data->alias) {
+		xfree(data->alias_ylocs);
+		xfree(data->alias_zlocs);
+	}
+
 #ifdef USE_CUDA
 	if (data->gpu_kernel != NULL)
 		md_free(data->gpu_kernel);
@@ -368,7 +425,35 @@ static void kern_free(const linop_data_t* _data)
 	xfree(data);
 }
 
-static const struct linop_s* linop_kern_create(bool gpu_flag, 
+static int calculate_num_alias_locations(long num_adc, const long kernel_dims[DIMS], complex float* kernel)
+{
+	long sy = kernel_dims[1];
+	long sz = kernel_dims[2];
+	long K  = 0;
+	for (long y = 0; y < sy; y ++)
+		for (long z = 0; z < sz; z ++)
+			K += (creal(kernel[y + z * sy]) > 0.9 * num_adc);
+	return K;
+}
+
+static void calculate_alias_locations(long K, long* alias_ylocs, long* alias_zlocs, const long kernel_dims[DIMS], complex float* kernel)
+{
+	long sy = kernel_dims[1];
+	long sz = kernel_dims[2];
+	long k = 0;
+	for (long y = 0; y < sy; y ++) {
+		for (long z = 0; z < sz; z ++) {
+			if (creal(kernel[y + z * sy]) > 0.9 * sy * sz) {
+				alias_ylocs[k] = y;
+				alias_zlocs[k] = z;
+				k++;
+				assert(k < K);
+			}
+		}
+	}
+}
+
+static const struct linop_s* linop_kern_create(bool gpu_flag, bool alias,
 	const long _reorder_dims[DIMS], complex float* reorder,
 	const long _phi_dims[DIMS],     complex float* phi,
 	const long _kernel_dims[DIMS],  complex float* kernel,
@@ -378,6 +463,9 @@ static const struct linop_s* linop_kern_create(bool gpu_flag,
 	SET_TYPEID(kern_s, data);
 
 	data->N = DIMS;
+	if (alias)
+		data->K = calculate_num_alias_locations(_reorder_dims[0], _kernel_dims, kernel);
+	data->alias = alias;
 
 	PTR_ALLOC(long[DIMS], reorder_dims);
 	PTR_ALLOC(long[DIMS], phi_dims);
@@ -394,13 +482,37 @@ static const struct linop_s* linop_kern_create(bool gpu_flag,
 	data->table_dims   = *PTR_PASS(table_dims);
 	data->kernel_dims  = *PTR_PASS(kernel_dims);
 
+	long loc_dims[DIMS] = { [0 ... DIMS - 1] = 1};
+	long* _alias_ylocs = NULL;
+	long* _alias_zlocs = NULL;
+
+	if (alias) {
+		loc_dims[0] = data->K;
+		_alias_ylocs = md_calloc(DIMS, loc_dims, CFL_SIZE);
+		_alias_zlocs = md_calloc(DIMS, loc_dims, CFL_SIZE);
+
+		calculate_alias_locations(data->K, _alias_ylocs, _alias_zlocs, _kernel_dims, kernel);
+
+		PTR_ALLOC(long[data->K], alias_ylocs);
+		PTR_ALLOC(long[data->K], alias_zlocs);
+
+		md_copy_dims(data->K, *alias_ylocs, _alias_ylocs);
+		md_copy_dims(data->K, *alias_zlocs, _alias_zlocs);
+
+		data->alias_ylocs = *PTR_PASS(alias_ylocs);
+		data->alias_zlocs = *PTR_PASS(alias_zlocs);
+
+		md_free(_alias_ylocs);
+		md_free(_alias_zlocs);
+	}
+
 	data->reorder = reorder;
 	data->phi     = phi;
 	data->kernel  = kernel;
 
 	data->gpu_kernel = NULL;
 #ifdef USE_CUDA
-	if(gpu_flag) {
+	if (gpu_flag && !alias) {
 
 		long repmat_kernel_dims[DIMS] = { [0 ... DIMS - 1] = 1};
 		md_copy_dims(DIMS, repmat_kernel_dims, _kernel_dims);
@@ -435,7 +547,7 @@ static const struct linop_s* linop_kern_create(bool gpu_flag,
 	output_dims[1] = _table_dims[1];
 	output_dims[2] = _reorder_dims[0];
 
-	const struct linop_s* K = linop_create(DIMS, output_dims, DIMS, input_dims, CAST_UP(PTR_PASS(data)), kern_apply, kern_adjoint, kern_normal, NULL, kern_free);
+	const struct linop_s* K = linop_create(DIMS, output_dims, DIMS, input_dims, CAST_UP(PTR_PASS(data)), kern_apply, kern_adjoint, alias ? kern_normal_alias: kern_normal, NULL, kern_free);
 	return K;
 }
 
@@ -645,6 +757,7 @@ int main_wshfl(int argc, char* argv[])
 	int   gpun      = -1;
 	bool  dcx       = false;
 	bool  pf        = false;
+	bool  alias     = false;
 
 	const struct opt_s opts[] = {
 		OPT_FLOAT( 'r', &lambda,  "lambda", "Soft threshold lambda for wavelet or locally low rank."),
@@ -657,6 +770,7 @@ int main_wshfl(int argc, char* argv[])
 		OPT_STRING('F', &fwd,     "frwrd",  "Go from shfl-coeffs to data-table. Pass in coeffs path."),
 		OPT_STRING('O', &x0,      "initl",  "Initialize reconstruction with guess."),
 		OPT_INT(   'g', &gpun,    "gpunm",  "GPU device number."),
+		OPT_SET(   'a', &alias,             "Use aliasing instead of FFT."),
 		OPT_SET(   'f', &fista,             "Reconstruct using FISTA instead of IST."),
 		OPT_SET(   'H', &hgwld,             "Use hogwild in IST/FISTA."),
 		OPT_SET(   'v', &dcx,               "Split coefficients to real and imaginary components."),
@@ -707,19 +821,28 @@ int main_wshfl(int argc, char* argv[])
 	long mask_dims[] = { [0 ... DIMS - 1] = 1 };
 	mask_dims[1] = sy;
 	mask_dims[2] = sz;
-	mask_dims[5] = tf;
+	mask_dims[5] = alias ? 1 : tf;
 	complex float* mask = md_calloc(DIMS, mask_dims, CFL_SIZE);
-	construct_mask(reorder_dims, reorder, mask_dims, mask);
+	construct_mask(alias, reorder_dims, reorder, mask_dims, mask);
 	debug_printf(DP_INFO, "Done.\n");
 
 	debug_printf(DP_INFO, "Constructing sampling-temporal kernel... ");
 	long kernel_dims[] = { [0 ... DIMS - 1] = 1 };
-	kernel_dims[1] = sy;
-	kernel_dims[2] = sz;
-	kernel_dims[6] = tk;
-	kernel_dims[7] = tk;
-	complex float* kernel = md_calloc(DIMS, kernel_dims, CFL_SIZE);
-	construct_kernel(mask_dims, mask, phi_dims, phi, kernel_dims, kernel);
+	complex float* kernel = NULL;
+	if (alias) {
+		kernel_dims[1] = sy;
+		kernel_dims[2] = sz;
+		kernel = md_calloc(DIMS, kernel_dims, CFL_SIZE);
+		ifft(DIMS, kernel_dims, FFT_FLAGS, kernel, mask);
+		md_zabs(DIMS, kernel_dims, kernel, kernel);
+	} else {
+		kernel_dims[1] = sy;
+		kernel_dims[2] = sz;
+		kernel_dims[6] = tk;
+		kernel_dims[7] = tk;
+		kernel = md_calloc(DIMS, kernel_dims, CFL_SIZE);
+		construct_kernel(mask_dims, mask, phi_dims, phi, kernel_dims, kernel);
+	}
 	md_free(mask);
 	debug_printf(DP_INFO, "Done.\n");
 
@@ -762,7 +885,7 @@ int main_wshfl(int argc, char* argv[])
 	debug_printf(DP_INFO, "\tFyz: %f seconds.\n", t2 - t1);
 
 	t1 = timestamp();
-	const struct linop_s* K = linop_kern_create(gpun >= 0, reorder_dims, reorder, phi_dims, phi, kernel_dims, kernel, table_dims);
+	const struct linop_s* K = linop_kern_create(gpun >= 0, alias, reorder_dims, reorder, phi_dims, phi, kernel_dims, kernel, table_dims);
 	t2 = timestamp();
 	debug_printf(DP_INFO, "\tK:   %f seconds.\n", t2 - t1);
 
@@ -795,8 +918,14 @@ int main_wshfl(int argc, char* argv[])
 	}
 
 	debug_printf(DP_INFO, "Forward linear operator information:\n");
-	struct linop_s* A = linop_chain_FF(linop_chain_FF(linop_chain_FF(linop_chain_FF(linop_chain_FF(
-		E, R), Fx), W), Fyz), K);
+	struct linop_s* A = NULL;
+	if (alias) {
+		A = linop_chain_FF(linop_chain_FF(linop_chain_FF(linop_chain_FF(
+		      E, R), Fx), W), K);
+	} else {
+		A = linop_chain_FF(linop_chain_FF(linop_chain_FF(linop_chain_FF(linop_chain_FF(
+		      E, R), Fx), W), Fyz), K);
+	}
 
 	if (dcx) {
 		debug_printf(DP_INFO, "\tSplitting result into real and imaginary components.\n");
