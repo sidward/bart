@@ -436,18 +436,20 @@ static int calculate_num_alias_locations(long num_adc, const long kernel_dims[DI
 	return K;
 }
 
-static void calculate_alias_locations(long K, long* alias_ylocs, long* alias_zlocs, const long kernel_dims[DIMS], complex float* kernel)
+static void calculate_alias_locations(long K, long num_adc, long* alias_ylocs, long* alias_zlocs, const long kernel_dims[DIMS], complex float* kernel)
 {
 	long sy = kernel_dims[1];
 	long sz = kernel_dims[2];
 	long k = 0;
+	debug_printf(DP_DEBUG2, "\n\tAliasing locations.\n");
 	for (long y = 0; y < sy; y ++) {
 		for (long z = 0; z < sz; z ++) {
-			if (creal(kernel[y + z * sy]) > 0.9 * sy * sz) {
+			if (creal(kernel[y + z * sy]) > 0.9 * num_adc) {
+				assert(k < K);
 				alias_ylocs[k] = y;
 				alias_zlocs[k] = z;
 				k++;
-				assert(k < K);
+				debug_printf(DP_DEBUG2, "\t\t(%04d, %04d)\n", y, z);
 			}
 		}
 	}
@@ -491,7 +493,7 @@ static const struct linop_s* linop_kern_create(bool gpu_flag, bool alias,
 		_alias_ylocs = md_calloc(DIMS, loc_dims, CFL_SIZE);
 		_alias_zlocs = md_calloc(DIMS, loc_dims, CFL_SIZE);
 
-		calculate_alias_locations(data->K, _alias_ylocs, _alias_zlocs, _kernel_dims, kernel);
+		calculate_alias_locations(data->K, _reorder_dims[0], _alias_ylocs, _alias_zlocs, _kernel_dims, kernel);
 
 		PTR_ALLOC(long[data->K], alias_ylocs);
 		PTR_ALLOC(long[data->K], alias_zlocs);
