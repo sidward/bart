@@ -245,15 +245,13 @@ static float sure_crop(float var, const long evec_dims[5], complex float* evec_d
 	debug_printf(DP_INFO,   "|   MSEA   |   MSEM   |   MSEB   |\n");
 	debug_printf(DP_INFO,   "----------------------------------        ----------------------------------\n");
 	while (cb - ca > 0.01) {
-		*div   = 0;
-
+		// MSE_A
 		md_clear(5,      W_dims,   ip, CFL_SIZE);
 		md_clear(5,     im_dims, proj, CFL_SIZE);
 		md_clear(5,   evec_dims,   LM, CFL_SIZE);
 		md_clear(5, calreg_dims,   TC, CFL_SIZE);
-
-		// MSE_A
 		mse_a = 0;
+		*div  = 0;
 		crop_weight(evec_dims, M, crop_thresh_function, ca, W);                  // Cropping.
 		md_zfmacc2(5,   tdims_ip,   stro_ip,   ip,   str1_ip, im,   str2_ip, M); // Projection.
 		md_zfmac2 (5, tdims_proj, stro_proj, proj, str1_proj, ip, str2_proj, M);
@@ -271,7 +269,12 @@ static float sure_crop(float var, const long evec_dims[5], complex float* evec_d
 		mse_a += 2 * var * creal(*div);
 
 		// MSE_B
+		md_clear(5,      W_dims,   ip, CFL_SIZE);
+		md_clear(5,     im_dims, proj, CFL_SIZE);
+		md_clear(5,   evec_dims,   LM, CFL_SIZE);
+		md_clear(5, calreg_dims,   TC, CFL_SIZE);
 		mse_b = 0;
+		*div  = 0;
 		crop_weight(evec_dims, M, crop_thresh_function, cb, W);                  // Cropping.
 		md_zfmacc2(5,   tdims_ip,   stro_ip,   ip,   str1_ip, im,   str2_ip, M); // Projection.
 		md_zfmac2 (5, tdims_proj, stro_proj, proj, str1_proj, ip, str2_proj, M);
@@ -289,8 +292,13 @@ static float sure_crop(float var, const long evec_dims[5], complex float* evec_d
 		mse_b += 2 * var * creal(*div);
 
 		// MSE
+		md_clear(5,      W_dims,   ip, CFL_SIZE);
+		md_clear(5,     im_dims, proj, CFL_SIZE);
+		md_clear(5,   evec_dims,   LM, CFL_SIZE);
+		md_clear(5, calreg_dims,   TC, CFL_SIZE);
 		c	= (cb + ca)/2;
 		mse = 0;
+		*div  = 0;
 		crop_weight(evec_dims, M, crop_thresh_function, c, W);                     // Cropping.
 		md_zfmacc2(5,   tdims_ip,   stro_ip,   ip,   str1_ip, im,   str2_ip, M);   // Projection.
 		md_zfmac2 (5, tdims_proj, stro_proj, proj, str1_proj, ip, str2_proj, M);
@@ -307,7 +315,7 @@ static float sure_crop(float var, const long evec_dims[5], complex float* evec_d
 		md_zfmacc2(5, evec_dims, stro_div, div, str1_div, LM, str2_div, LM);       // Calc SURE div using low res maps.
 		mse += 2 * var * creal(*div);
 
-		debug_printf(DP_INFO,   "| %0.2e | %0.2e | %0.2e |        ", ca,    c,      cb);
+		debug_printf(DP_INFO,   "| %0.2e | %0.2e | %0.2e |        ", ca,      c,    cb);
 		debug_printf(DP_INFO,   "| %0.2e | %0.2e | %0.2e |\n",       mse_a, mse, mse_b);
 
 		if (mse_a <= mse_b)
