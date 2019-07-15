@@ -445,6 +445,7 @@ struct multc_s {
 	INTERFACE(linop_data_t);
 
 	unsigned int nc;
+	unsigned int md;
 	const struct linop_s* sc_op; // Single channel operator.
 	complex float* maps;
 };
@@ -455,16 +456,24 @@ static void multc_apply(const linop_data_t* _data, complex float* dst, const com
 
 	// Loading single channel operator.
 	const struct linop* fwd = data->sc_op->forward;
-	long* src_dims = linop_domain(fwd)->dims;
-	long* out_dims = linop_codomain(fwd)->dims;
+	long* sc_inp_dims = linop_domain(fwd)->dims;
+	long* sc_out_dims = linop_codomain(fwd)->dims;
 
-	long sx = src_dims[0];
-	long sy = src_dims[1];
-	long sz = src_dims[2];
-	long md = src_dims[4];
-	long wx = out_dims[0];
-	long  n = out_dims[2];
+	long sx = sc_inp_dims[0];
+	long sy = sc_inp_dims[1];
+	long sz = sc_inp_dims[2];
+	long wx = sc_out_dims[0];
+	long  n = sc_out_dims[2];
 	long nc = data->nc;
+	long md = data->md;
+
+	long src_dims = { [0 ... DIMS - 1] = 1};
+	md_copy_dims(DIMS, src_dims, sc_in_dims);
+	src_dims[MAPS_DIM] = md;
+
+	long dst_dims = { [0 ... DIMS - 1] = 1};
+	md_copy_dims(DIMS, dst_dims, sc_out_dims);
+	src_dims[1] = nc;
 
 	long map_dims = { [0 ... DIMS - 1] = 1};
 	map_dims[0] = sx;
@@ -473,16 +482,13 @@ static void multc_apply(const linop_data_t* _data, complex float* dst, const com
 	map_dims[3] = nc;
 	map_dims[4] = md;
 
-	// Buffer to store a single ESPIRiT map.
 	long single_map_dims = { [0 ... DIMS - 1] = 1 };
 	md_copy_dims(DIMS, single_map_dims, map_dims);
 	single_map_dims[COIL_DIM] = 1;
 	complex float* single_map = md_alloc_sameplace(DIMS, single_map_dims, CFL_SIZE, src);
 
-	// Buffer to store the result of single_map and src.
-	complex float* map_src = md_alloc_sameplace(DIMS, src_dims, CFL_SIZE, src);
+	complex float* buffer = md_alloc_sameplace(DIMS, sc_inp_dims, CFL_SIZE, src);
 
-	// Buffer to store a permuted ADC table.
 	long tbl_dims = { [0 ... DIMS - 1] = 1};
 	tbl_dims[0] = wx;
 	tbl_dims[1] = n;
@@ -490,39 +496,26 @@ static void multc_apply(const linop_data_t* _data, complex float* dst, const com
 	complex float* tbl = md_alloc_sameplace(DIMS, tbl_dims, CFL_SIZE, src);
 	md_clear(DIMS, tbl_dims, tbl, CFL_SIZE);
 
-	// Dst dims.
-	long dst_dims = { [0 ... DIMS - 1] = 1};
-	tbl_dims[0] = wx;
-	tbl_dims[1] = nc;
-	tbl_dims[2] = n;
-
-	// Position array for md_slice.
 	long pos[DIMS] = { [0 ... DIMS - 1] = 0 };
 
-	// Max dims for md_zfmac2.
 	long zfmac_dims[DIMS] = { [0 ... DIMS - 1] = 1 };
 	md_copy_dims(DIMS, zfmac_dims, src_dims);
-	zfmac_dims[COIL_DIM] = nc;
 
-	// Strides for md_zfmac2.
 	long strides_single_map[DIMS];
 	md_calc_strides(DIMS, strides_single_map, single_map_dims, CFL_SIZE);
 	long strides_src[DIMS];
 	md_calc_strides(DIMS, strides_src, src_dims, CFL_SIZE);
+	long strides_sc_inp[DIMS];
+	md_calc_strides(DIMS, strides_sc_inp, sc_inp_dims, CFL_SIZE);
 
 	for (long k = 0; k < data->nc; k++) {
 		md_clear(DIMS, single_map_dims, single_map, CFL_SIZE);
-		md_clear(DIMS, src_dims, map_src, CFL_SIZE);
-
-		// Selecting a single coil.
+		md_clear(DIMS, sc_inp_dims, buffer, CFL_SIZE);
 		pos[COIL_DIM] = k;
 		md_slice(DIMS, COIL_FLAG, pos, map_dims, single_map, data->maps, CFL_SIZE);
-
-		// Calculating weighting.
-		md_zfmac2(DIMS, zfmac_dims, src_str, map_src, src_str, src, map_str, map_src);
-
-		// Applying single channel forward operator.
-		operator_apply(fwd, DIMS, out_dims, tbl  + (wx * n * k), DIMS, src_dims, src);
+		pos[COIL_DIM] = 0;
+		md_zfmac2(DIMS, zfmac_dims, strides_sc_inp, buffer, strides_src, src, strides_single_map, single_map);
+		operator_apply(fwd, DIMS, sc_out_dims, tbl  + (wx * n * k), DIMS, sc_inp_dims, buffer);
 	}
 
 	md_clear(DIMS, dst_dims, dst, CFL_SIZE);
@@ -530,11 +523,87 @@ static void multc_apply(const linop_data_t* _data, complex float* dst, const com
 	for (unsigned int i = 4; i < DIMS; i++)
 		permute_order[i] = i;
 	md_permute(DIMS, permute_order, dst_dims, dst, tbl_dims, tbl, CFL_SIZE);
+
+	md_free(single_map);
+	md_free(buffer);
+	md_free(tbl);
 }
 
 static void multc_adjoint(const linop_data_t* _data, complex float* dst, const complex float* src)
 {
 	const struct multc_s* data = CAST_DOWN(multc_s, _data);
+
+	// Loading single channel operator.
+	const struct linop* adj = data->sc_op->adjoint;
+	long* sc_inp_dims = linop_domain(adj)->dims;
+	long* sc_out_dims = linop_codomain(adj)->dims;
+
+	long sx = sc_out_dims[0];
+	long sy = sc_out_dims[1];
+	long sz = sc_out_dims[2];
+	long wx = sc_inp_dims[0];
+	long  n = sc_inp_dims[2];
+	long nc = data->nc;
+	long md = data->md;
+
+	long src_dims = { [0 ... DIMS - 1] = 1};
+	md_copy_dims(DIMS, src_dims, sc_in_dims);
+	src_dims[1] = nc;
+
+	long dst_dims = { [0 ... DIMS - 1] = 1};
+	md_copy_dims(DIMS, dst_dims, sc_out_dims);
+	src_dims[MAPS_DIM] = md;
+
+	long map_dims = { [0 ... DIMS - 1] = 1};
+	map_dims[0] = sx;
+	map_dims[1] = sy;
+	map_dims[2] = sz;
+	map_dims[3] = nc;
+	map_dims[4] = md;
+
+	long single_map_dims = { [0 ... DIMS - 1] = 1 };
+	md_copy_dims(DIMS, single_map_dims, map_dims);
+	single_map_dims[COIL_DIM] = 1;
+	complex float* single_map = md_alloc_sameplace(DIMS, single_map_dims, CFL_SIZE, src);
+
+	complex float* buffer1 = md_alloc_sameplace(DIMS, sc_out_dims, CFL_SIZE, src);
+	complex float* buffer2 = md_alloc_sameplace(DIMS, dst_dims, CFL_SIZE, src);
+
+	long tbl_dims = { [0 ... DIMS - 1] = 1};
+	tbl_dims[0] = wx;
+	tbl_dims[2] = n;
+	complex float* tbl = md_alloc_sameplace(DIMS, tbl_dims, CFL_SIZE, src);
+
+	long pos[DIMS] = { [0 ... DIMS - 1] = 0 };
+
+	long strides_single_map[DIMS];
+	md_calc_strides(DIMS, strides_single_map, single_map_dims, CFL_SIZE);
+	long strides_sc_out[DIMS];
+	md_calc_strides(DIMS, strides_sc_out, sc_out_dims, CFL_SIZE);
+	long strides_dst[DIMS];
+	md_calc_strides(DIMS, strides_dst, dst_dims, CFL_SIZE);
+
+	md_clear(DIMS, dst_dims, dst, CFL_SIZE);
+	for (long k = 0; k < data->nc; k++) {
+		md_clear(DIMS, single_map_dims, single_map, CFL_SIZE);
+		md_clear(DIMS, sc_out_dims, buffer1, CFL_SIZE);
+		md_clear(DIMS, dst_dims, buffer2, CFL_SIZE);
+		md_clear(DIMS, tbl_dims, tbl, CFL_SIZE);
+		pos[1] = k;
+		md_slice(DIMS, 2, pos, src_dims, tbl, src, CFL_SIZE);
+		pos[1] = 0;
+		operator_apply(adj, DIMS, sc_out_dims, buffer1, DIMS, tbl_dims, tbl);
+		pos[COIL_DIM] = k;
+		md_slice(DIMS, COIL_FLAG, pos, map_dims, single_map, data->maps, CFL_SIZE);
+		pos[COIL_DIM] = 0;
+		md_zfmacc2(DIMS, zfmac_dims, strides_buffer2, buffer2, strides_sc_out, buffer1, strides_single_map, single_map);
+		md_zadd(DIMS, dst_dims, dst, dst, buffer2);
+	}
+
+	md_free(single_map);
+	md_free(buffer1);
+	md_free(buffer2);
+	md_free(tbl);
 }
 
 static void multc_normal(const linop_data_t* _data, complex float* dst, const complex float* src)
