@@ -381,8 +381,6 @@ static const struct linop_s* linop_kern_create(bool gpu_flag,
 	PTR_ALLOC(struct kern_s, data);
 	SET_TYPEID(kern_s, data);
 
-	data->N = DIMS;
-
 	PTR_ALLOC(long[DIMS], reorder_dims);
 	PTR_ALLOC(long[DIMS], phi_dims);
 	PTR_ALLOC(long[DIMS], table_dims);
@@ -441,6 +439,112 @@ static const struct linop_s* linop_kern_create(bool gpu_flag,
 
 	const struct linop_s* K = linop_create(DIMS, output_dims, DIMS, input_dims, CAST_UP(PTR_PASS(data)), kern_apply, kern_adjoint, kern_normal, NULL, kern_free);
 	return K;
+}
+
+struct multc_s {
+	INTERFACE(linop_data_t);
+
+	unsigned int nc;
+	const struct linop_s* sc_op; // Single channel operator.
+	complex float* maps;
+};
+
+static void multc_apply(const linop_data_t* _data, complex float* dst, const complex float* src)
+{
+	const struct multc_s* data = CAST_DOWN(multc_s, _data);
+
+	// Loading single channel operator.
+	const struct linop* fwd = data->sc_op->forward;
+	long* src_dims = linop_domain(fwd)->dims;
+	long* out_dims = linop_codomain(fwd)->dims;
+
+	long sx = src_dims[0];
+	long sy = src_dims[1];
+	long sz = src_dims[2];
+	long md = src_dims[4];
+	long wx = out_dims[0];
+	long  n = out_dims[2];
+	long nc = data->nc;
+
+	long map_dims = { [0 ... DIMS - 1] = 1};
+	map_dims[0] = sx;
+	map_dims[1] = sy;
+	map_dims[2] = sz;
+	map_dims[3] = nc;
+	map_dims[4] = md;
+
+	// Buffer to store a single ESPIRiT map.
+	long single_map_dims = { [0 ... DIMS - 1] = 1 };
+	md_copy_dims(DIMS, single_map_dims, map_dims);
+	single_map_dims[COIL_DIM] = 1;
+	complex float* single_map = md_alloc_sameplace(DIMS, single_map_dims, CFL_SIZE, src);
+
+	// Buffer to store the result of single_map and src.
+	complex float* map_src = md_alloc_sameplace(DIMS, src_dims, CFL_SIZE, src);
+
+	// Buffer to store a permuted ADC table.
+	long tbl_dims = { [0 ... DIMS - 1] = 1};
+	tbl_dims[0] = wx;
+	tbl_dims[1] = n;
+	tbl_dims[2] = nc;
+	complex float* tbl = md_alloc_sameplace(DIMS, tbl_dims, CFL_SIZE, src);
+	md_clear(DIMS, tbl_dims, tbl, CFL_SIZE);
+
+	// Dst dims.
+	long dst_dims = { [0 ... DIMS - 1] = 1};
+	tbl_dims[0] = wx;
+	tbl_dims[1] = nc;
+	tbl_dims[2] = n;
+
+	// Position array for md_slice.
+	long pos[DIMS] = { [0 ... DIMS - 1] = 0 };
+
+	// Max dims for md_zfmac2.
+	long zfmac_dims[DIMS] = { [0 ... DIMS - 1] = 1 };
+	md_copy_dims(DIMS, zfmac_dims, src_dims);
+	zfmac_dims[COIL_DIM] = nc;
+
+	// Strides for md_zfmac2.
+	long strides_single_map[DIMS];
+	md_calc_strides(DIMS, strides_single_map, single_map_dims, CFL_SIZE);
+	long strides_src[DIMS];
+	md_calc_strides(DIMS, strides_src, src_dims, CFL_SIZE);
+
+	for (long k = 0; k < data->nc; k++) {
+		md_clear(DIMS, single_map_dims, single_map, CFL_SIZE);
+		md_clear(DIMS, src_dims, map_src, CFL_SIZE);
+
+		// Selecting a single coil.
+		pos[COIL_DIM] = k;
+		md_slice(DIMS, COIL_FLAG, pos, map_dims, single_map, data->maps, CFL_SIZE);
+
+		// Calculating weighting.
+		md_zfmac2(DIMS, zfmac_dims, src_str, map_src, src_str, src, map_str, map_src);
+
+		// Applying single channel forward operator.
+		operator_apply(fwd, DIMS, out_dims, tbl  + (wx * n * k), DIMS, src_dims, src);
+	}
+
+	md_clear(DIMS, dst_dims, dst, CFL_SIZE);
+	unsigned int permute_order[DIMS] = {0, 2, 1}
+	for (unsigned int i = 4; i < DIMS; i++)
+		permute_order[i] = i;
+	md_permute(DIMS, permute_order, dst_dims, dst, tbl_dims, tbl, CFL_SIZE);
+}
+
+static void multc_adjoint(const linop_data_t* _data, complex float* dst, const complex float* src)
+{
+	const struct multc_s* data = CAST_DOWN(multc_s, _data);
+}
+
+static void multc_normal(const linop_data_t* _data, complex float* dst, const complex float* src)
+{
+	const struct multc_s* data = CAST_DOWN(multc_s, _data);
+}
+
+static void multc_free(const linop_data_t* _data, complex float* dst, const complex float* src)
+{
+	const struct multc_s* data = CAST_DOWN(multc_s, _data);
 }
 
 /* ESPIRiT operator. */
