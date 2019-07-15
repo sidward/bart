@@ -662,7 +662,7 @@ static void multc_normal(const linop_data_t* _data, complex float* dst, const co
 		md_slice(DIMS, COIL_FLAG, pos, map_dims, single_map, data->maps, CFL_SIZE);
 		pos[COIL_DIM] = 0;
 		md_zfmac2(DIMS, dims, strides_sc, buffer1, strides, src, strides_single_map, single_map);
-		operator_apply(nrm, DIMS, sc_dims, buffer1, DIMS, sc_dims, buffer2);
+		operator_apply(nrm, DIMS, sc_dims, buffer2, DIMS, sc_dims, buffer1);
 		md_zfmacc2(DIMS, dims, strides, buffer3, strides_sc, buffer2, strides_single_map, single_map);
 		md_zadd(DIMS, dims, dst, dst, buffer3);
 	}
