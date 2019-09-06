@@ -28,8 +28,6 @@
 
 #include "misc/debug.h"
 
-#include "calib/estvar.h"
-
 #include "softweight.h"
 
 /*

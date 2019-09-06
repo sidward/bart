@@ -25,7 +25,7 @@
 #include "num/init.h"
 
 #include "calib/calib.h"
-#include "calib/estvar.h"
+#include "estnoise/estnoise.h"
 
 #ifndef CFL_SIZE
 #define CFL_SIZE sizeof(complex float)
@@ -161,7 +161,7 @@ int main_ecalib(int argc, char* argv[])
 	(conf.usegpu ? num_init_gpu : num_init)();
 
         if ((conf.var < 0.) && (conf.weighting || (conf.crop < 0.)))
-		conf.var = estvar_calreg(conf.kdims, cal_dims, cal_data);
+		conf.var = estvar_ksp(5, cal_dims, cal_data);
 
 	if (one) {
 
