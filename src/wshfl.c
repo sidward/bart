@@ -1068,7 +1068,7 @@ int main_wshfl(int argc, char* argv[])
 	if (dcx) {
 		debug_printf(DP_INFO, "\tSplitting result into real and imaginary components.\n");
 		struct linop_s* tmp = A;
-		struct linop_s* dcxop = linop_decompose_complex_create(DIMS, ITER_DIM, linop_domain(A)->dims);
+		struct linop_s* dcxop = linop_decompose_complex_create(DIMS, ITER_DIM, false, linop_domain(A)->dims);
 
 		A = linop_chain(dcxop, tmp);
 

@@ -67,7 +67,7 @@ static void decompose_complex_free(const linop_data_t* _data)
 	xfree(data);
 }
 
-struct linop_s* linop_decompose_complex_create(unsigned int N, unsigned int D, const long dims[N])
+struct linop_s* linop_decompose_complex_create(unsigned int N, unsigned int D, bool transpose, const long dims[N])
 {
 	assert(D < N);
 	for (long k = D; k < N; k++)
@@ -98,5 +98,8 @@ struct linop_s* linop_decompose_complex_create(unsigned int N, unsigned int D, c
 	data->idims = *PTR_PASS(idims_alloc);
 	data->odims = *PTR_PASS(odims_alloc);
 
-	return linop_create(N, odims, N, idims, CAST_UP(PTR_PASS(data)), decompose_complex_fwd, decompose_complex_adj, decompose_complex_nrm, NULL, decompose_complex_free);
+	if (transpose)
+		return linop_create(N, idims, N, odims, CAST_UP(PTR_PASS(data)), decompose_complex_adj, decompose_complex_fwd, decompose_complex_nrm, NULL, decompose_complex_free);
+	else
+		return linop_create(N, odims, N, idims, CAST_UP(PTR_PASS(data)), decompose_complex_fwd, decompose_complex_adj, decompose_complex_nrm, NULL, decompose_complex_free);
 }

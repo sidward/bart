@@ -26,18 +26,20 @@
 #include "misc/resize.h"
 #include "misc/debug.h"
 #include "misc/utils.h"
+#include "misc/mmio.h"
 
 #include "linops/linop.h"
 #include "linops/someops.h"
 #include "linops/waveop.h"
 #include "linops/finite_diff.h"
+#include "linops/decompose_complex.h"
 
 #include "estnoise.h"
 
-static int compare_magnitude(const void* data, int a, int b)
+static int compare_real(const void* data, int a, int b)
 {
-	const complex float* ksp = data;
-  float f = cabsf(ksp[a]) - cabsf(ksp[b]);
+	const complex float* arr = data;
+  float f = crealf(arr[a]) - crealf(arr[b]);
   if (f > 0)
 		return 1;
   if (f < 0)
@@ -54,9 +56,9 @@ float estvar_ksp(long N, const long ksp_dims[N], const complex float* ksp) {
 	long minsize[N];
 	md_set_dims(N, minsize, 1);
 
-	minsize[0] = MIN(sx, 16);
-	minsize[1] = MIN(sy, 16);
-	minsize[2] = MIN(sz, 16);
+	minsize[0] = MIN(sx, 4);
+	minsize[1] = MIN(sy, 4);
+	minsize[2] = MIN(sz, 4);
 
 	unsigned int WAVFLAG = (sx > 1) * READ_FLAG | (sy > 1) * PHS1_FLAG | (sz > 2) * PHS2_FLAG;
 
@@ -66,27 +68,44 @@ float estvar_ksp(long N, const long ksp_dims[N], const complex float* ksp) {
 
 	const struct linop_s* fourier  = linop_ifftc_create(N, ksp_dims, FFT_FLAGS);
 	const struct linop_s* sparse   = linop_wavelet_create(N, WAVFLAG, ksp_dims, ksp_str, minsize, true);
-	const struct linop_s* combine  = linop_chain_FF(fourier, sparse);
+	//const struct linop_s* sparse   = linop_zfinitediff_create(N, ksp_dims, 0, true);
+	const struct linop_s* sprfr    = linop_chain_FF(fourier, sparse);
+	const struct linop_s* dcx      = linop_decompose_complex_create(N, N - 1, true, linop_codomain(sprfr)->dims);
+	const struct linop_s* combine  = linop_chain_FF(sprfr, dcx);
   const struct iovec_s* codomain = linop_codomain(combine);
 
 	complex float* spr = md_alloc_sameplace(N, codomain->dims, CFL_SIZE, ksp);
 	md_clear(N, codomain->dims, spr, CFL_SIZE);
 	operator_apply(combine->forward, N, codomain->dims, spr, N, ksp_dims, ksp);
 
-	long M = md_calc_size(N, codomain->dims);
+  long M = md_calc_size(N, codomain->dims);
+  long make_real_dims[1] = { M/2 };
+  md_zsmul(1, make_real_dims, spr + M/2, spr + M/2, -1.i);
+
   long ord_dims[1] = { M };
   int* ord = md_alloc(1, ord_dims, sizeof(int));
 
-  for (long k = 0; k < M; k++)
+  for (int k = 0; k < M; k++)
     ord[k] = k;
 
-	quicksort(M, ord, spr, compare_magnitude);
+	quicksort(M, ord, spr, compare_real);
 
-  float median = cabsf(spr[ord[(int) floor(M/2)]]);
-  float var = median * median * M_PI/2;
+  float median = crealf(spr[ord[M/2]]);
+
+  md_zsadd(N, codomain->dims, spr, spr, -median);
+  md_zabs(N, codomain->dims, spr, spr);
+
+  for (int k = 0; k < M; k++)
+    ord[k] = k;
+
+	quicksort(M, ord, spr, compare_real);
+  float mad = crealf(spr[ord[M/2]]);
+
+  float stdev = 1.4826 * mad;
 
 	md_free(ord);
 	md_free(spr);
+  linop_free(combine);
 
-	return var;
+	return 2.0 * powf(stdev, 2);
 }
