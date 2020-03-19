@@ -1303,7 +1303,7 @@ int main_wshfl(int argc, char* argv[])
 		        operator_apply(A->forward, DIMS, table_dims, testtbl, DIMS, coeff_dims, testrec);
             testerr = md_znrmse(DIMS, table_dims, table, testtbl);
 
-	          debug_printf(DP_INFO, "--> (%1.3e, %1.3e, %1.3e, %1.3e) %1.5e\n", testerr);
+	          debug_printf(DP_INFO, "--> (%1.3e, %1.3e, %1.3e, %1.3e) %1.5e\n", grady_dt, gradz_dt, grady_da, gradz_da, testerr);
 
             if (besterr == -1 || testerr < besterr) {
               besterr = testerr;
