@@ -56,7 +56,9 @@
 #include "wavelet/wavthresh.h"
 #include "lowrank/lrthresh.h"
 
-static const char usage_str[] = "<maps> <wave> <phi> <reorder> <table> <output>";
+#include "wave/wave.h"
+
+static const char usage_str[] = "<maps> <phi> <reorder> <table> <output>";
 static const char help_str[]  = 
 	"Perform a wave-shuffling reconstruction.\n\n"
 	"Conventions:\n"
@@ -881,23 +883,38 @@ int main_wshfl(int argc, char* argv[])
 {
 	double start_time = timestamp();
 
-	float lambda    = 1E-5;
-	int   maxiter   = 300;
-	int   blksize   = 8;
-	float step      = 0.5;
-	float tol       = 1.E-3;
-	bool  llr       = false;
-	bool  wav       = false;
-	bool  fista     = false;
-	bool  hgwld     = false;
-	float cont      = 1;
-	float eval      = -1;
-	bool  ksp       = false;
-	const char* fwd = NULL;
-	const char* x0  = NULL;
-	int   gpun      = -1;
-	bool  dcx       = false;
-	bool  pf        = false;
+	bool  llr        = false;
+	bool  wav        = false;
+	bool  fista      = false;
+	bool  hgwld      = false;
+	bool  ksp        = false;
+	bool  apsf       = false;
+	bool  dcx        = false;
+	bool  pf         = false;
+  bool  sine       = false;
+	int   adc        = 3000;
+	int   maxiter    = 300;
+	int   blksize    = 8;
+	int   gpun       = -1;
+	int   ncyc       = 8;
+  int   search     = 32;
+	float lambda     = 1E-5;
+	float step       = 0.5;
+	float tol        = 1.E-3;
+	float cont       = 1;
+	float eval       = -1;
+  float dy         = 1;
+  float dz         = 1;
+  float ofY        = 0;
+  float ofZ        = 0;
+  float dt         = 1E-5;
+  float gmax       = 1.6;
+  float smax       = 18700;
+  float arng       = 0.02;
+  float trng       = 1E-5;
+	const char* fwd  = NULL;
+	const char* x0   = NULL;
+	const char* wpth = NULL;
 
 	const struct opt_s opts[] = {
 		OPT_FLOAT( 'r', &lambda,  "lambda", "Regularization value."),
@@ -907,9 +924,22 @@ int main_wshfl(int argc, char* argv[])
 		OPT_FLOAT( 'c', &cont,    "cntnu",  "Continuation value for IST/FISTA."),
 		OPT_FLOAT( 't', &tol,     "toler",  "Tolerance convergence condition for iterative method."),
 		OPT_FLOAT( 'e', &eval,    "eigvl",  "Maximum eigenvalue of normal operator, if known."),
+		OPT_STRING('W', &wpth,    "wvpth",  "Use this wave-psf."),
 		OPT_STRING('F', &fwd,     "frwrd",  "Go from shfl-coeffs to data-table. Pass in coeffs path."),
 		OPT_STRING('O', &x0,      "initl",  "Initialize reconstruction with guess."),
 		OPT_INT(   'g', &gpun,    "gpunm",  "GPU device number."),
+		OPT_FLOAT( 'y', &dy,      "yres",   "Resolution of first phase encode in cm. Required only if using option -A."),
+		OPT_FLOAT( 'z', &dz,      "zres",   "Resolution of second phase encode in cm. Required only if using option -A."),
+		OPT_FLOAT( 'Y', &ofY,     "offY",   "Offset y from isocenter in cm."),
+		OPT_FLOAT( 'Z', &ofZ,     "offZ",   "Offset z from isocenter in cm."),
+		OPT_INT(   'a', &adc,     "ADC_T",  "Readout duration in microseconds. Required only if using option -A."),
+		OPT_FLOAT( 'T', &dt,      "ADC_dt", "ADC sampling rate in seconds. Required only if using option -A."),
+		OPT_FLOAT( 'G', &gmax,    "gMax",   "Maximum gradient amplitude in Gauss/cm. Required only if using option -A."),
+		OPT_FLOAT( 'S', &smax,    "sMax",   "Maximum gradient slew rate in Gauss/cm/second. Required only if using option -A."),
+		OPT_FLOAT( 'm', &arng,    "arng",   "Gradient amplitude scaling range for option -A."),
+		OPT_FLOAT( 'q', &trng,    "trng",   "Time shift range for option -A."),
+		OPT_INT(   'C', &ncyc,    "ncyc",   "Number of cycles in the gradient wave. Required only if using option -A."),
+		OPT_INT(   'N', &search,  "srch",   "Number of values to check per variable for option -A."),
 		OPT_SET(   'K', &ksp,               "Go from data-table to shuffling basis k-space."),
 		OPT_SET(   'f', &fista,             "Reconstruct using FISTA instead of IST."),
 		OPT_SET(   'H', &hgwld,             "Use hogwild in IST/FISTA."),
@@ -917,9 +947,16 @@ int main_wshfl(int argc, char* argv[])
 		OPT_SET(   'w', &wav,               "Use wavelet."),
 		OPT_SET(   'l', &llr,               "Use locally low rank across temporal coefficients."),
 		OPT_SET(   'p', &pf,                "Use locally low rank and real-imaginary components for partial fourier."),
+		OPT_SET(   'A', &apsf,              "Set to estimate PSF."),
+		OPT_SET(   'n', &sine,              "Set if y-phase encode is sine."),
+
 	};
 
-	cmdline(&argc, argv, 6, 6, usage_str, help_str, ARRAY_SIZE(opts), opts);
+	cmdline(&argc, argv, 5, 5, usage_str, help_str, ARRAY_SIZE(opts), opts);
+
+  assert(!(apsf == false && wpth == NULL));
+  if (ksp)
+    assert(wpth);
 
 	if (pf)
 		dcx = true;
@@ -928,9 +965,6 @@ int main_wshfl(int argc, char* argv[])
 
 	long maps_dims[DIMS];
 	complex float* maps = load_cfl(argv[1], DIMS, maps_dims);
-
-	long wave_dims[DIMS];
-	complex float* wave = load_cfl(argv[2], DIMS, wave_dims);
 
 	long phi_dims[DIMS];
 	complex float* phi = load_cfl(argv[3], DIMS, phi_dims);
@@ -941,14 +975,7 @@ int main_wshfl(int argc, char* argv[])
 	long table_dims[DIMS];
 	complex float* table = load_cfl(argv[5], DIMS, table_dims);
 
-	debug_printf(DP_INFO, "Done.\n");
-
-	if (gpun >= 0)
-		num_init_gpu_device(gpun);
-	else
-		num_init();
-
-	int wx = wave_dims[0];
+	int wx = table_dims[0];
 	int sx = maps_dims[0];
 	int sy = maps_dims[1];
 	int sz = maps_dims[2];
@@ -956,6 +983,25 @@ int main_wshfl(int argc, char* argv[])
 	int md = maps_dims[4];
 	int tf = phi_dims[5];
 	int tk = phi_dims[6];
+
+	long wave_dims[] = { [0 ... DIMS - 1] = 1 };
+	complex float* wave = NULL;
+  if (apsf) {
+    wave_dims[0] = wx;
+    wave_dims[1] = sy;
+    wave_dims[2] = sz;
+    wave = anon_cfl(NULL, DIMS, wave_dims);
+    gen_wavepsf(wx, sy, sz, adc, dt, ncyc, gmax, smax, dy, dz, ofY, ofZ, -trng, -trng, -(1+arng), -(1+arng), sine, wave);
+	} else {
+	  wave = load_cfl(argv[2], DIMS, wave_dims);
+  }
+
+	debug_printf(DP_INFO, "Done.\n");
+
+	if (gpun >= 0)
+		num_init_gpu_device(gpun);
+	else
+		num_init();
 
 	debug_printf(DP_INFO, "Constructing sampling mask from reorder table... ");
 	long mask_dims[] = { [0 ... DIMS - 1] = 1 };
@@ -996,6 +1042,7 @@ int main_wshfl(int argc, char* argv[])
 		ksp_dims[6] = tk;
 		complex float* res = create_cfl(argv[6], DIMS, ksp_dims);
 
+		debug_printf(DP_INFO, "Creating projection k-space...");
 		operator_apply(Knc->adjoint, DIMS, ksp_dims, res, DIMS, table_dims, table);
 
 		linop_free(Knc);
@@ -1006,6 +1053,7 @@ int main_wshfl(int argc, char* argv[])
 		unmap_cfl(DIMS, reorder_dims, reorder);
 		unmap_cfl(DIMS, table_dims, table);
 		unmap_cfl(DIMS, ksp_dims, res);
+		debug_printf(DP_INFO, "Done.\n");
 
 		return 0;
 	}
@@ -1025,8 +1073,9 @@ int main_wshfl(int argc, char* argv[])
 	t2 = timestamp();
 	debug_printf(DP_INFO, "\tFx:  %f seconds.\n", t2 - t1);
 
+	const struct linop_s* W = NULL;
 	t1 = timestamp();
-	const struct linop_s* W = linop_wave_create(wx, sy, sz, 1, tk, wave_dims[COEFF_DIM], wave);
+	W = linop_wave_create(wx, sy, sz, 1, tk, wave_dims[COEFF_DIM], wave);
 	t2 = timestamp();
 	debug_printf(DP_INFO, "\tW:   %f seconds.\n", t2 - t1);
 
@@ -1043,8 +1092,10 @@ int main_wshfl(int argc, char* argv[])
 	t2 = timestamp();
 	debug_printf(DP_INFO, "\tK:   %f seconds.\n", t2 - t1);
 
-	struct linop_s* A_sc = linop_chain_FF(linop_chain_FF(linop_chain_FF(linop_chain_FF(
-		R, Fx), W), Fyz), K);
+  struct linop_s* pre_wave= linop_chain_FF(R,  Fx);
+  struct linop_s* post_wave = linop_chain_FF(Fyz, K);
+  struct linop_s* inc_wave = linop_chain(pre_wave, W);
+	struct linop_s* A_sc = linop_chain(inc_wave, post_wave);
 
 	debug_printf(DP_INFO, "Single channel forward operator information:\n");
 	print_opdims(A_sc);
@@ -1223,17 +1274,72 @@ int main_wshfl(int argc, char* argv[])
 	debug_printf(DP_INFO, "Reconstruction... ");
 	complex float* recon = create_cfl(argv[6], DIMS, coeff_dims);
 	struct lsqr_conf lsqr_conf = { 0., gpun >= 0 };
-	double recon_start = timestamp();
-	const struct operator_p_s* J = lsqr2_create(&lsqr_conf, italgo, iconf, (const float*) init, A, NULL, 1, &T, NULL, NULL);
-	operator_p_apply(J, 1., DIMS, coeff_dims, recon, DIMS, table_dims, table);
-	md_zsmul(DIMS, coeff_dims, recon, recon, norm);
-	double recon_end = timestamp();
-	debug_printf(DP_INFO, "Done.\nReconstruction time: %f seconds.\n", recon_end - recon_start);
+  const struct operator_p_s* J = NULL;
+
+  if (apsf) {
+    complex float* testtbl = anon_cfl(NULL, DIMS, table_dims);
+    complex float* testrec = anon_cfl(NULL, DIMS, coeff_dims);
+
+    float besterr = -1;
+    float testerr = -1;
+    float grady_dt = -trng;
+    float gradz_dt = -trng;
+    float grady_da = -(1 + arng);
+    float gradz_da = -(1 + arng);
+    float dtstep = (2.0 * trng/search);
+    float dastep = 2.0 * (1.0 + arng)/search;
+
+    for (int k1 = 0; k1 < search; k1++) {
+      grady_dt += dtstep;
+      for (int k2 = 0; k2 < search; k2++) {
+        gradz_dt += dtstep;
+        for (int k3 = 0; k3 < search; k3++) {
+          grady_da += dastep;
+          for (int k4 = 0; k4 < search; k4++) {
+            gradz_da += dastep;
+
+	          J = lsqr2_create(&lsqr_conf, italgo, iconf, (const float*) init, A, NULL, 1, &T, NULL, NULL);
+	          operator_p_apply(J, 1., DIMS, coeff_dims, testrec, DIMS, table_dims, table);
+
+		        operator_apply(A->forward, DIMS, table_dims, testtbl, DIMS, coeff_dims, testrec);
+            testerr = md_znrmse(DIMS, table_dims, table, testtbl);
+
+            if (besterr == -1 || testerr < besterr) {
+              besterr = testerr;
+              md_copy(DIMS, coeff_dims, recon, testrec, CFL_SIZE);
+            }
+
+            linop_free(A);
+            linop_free(inc_wave);
+            linop_free(W);
+
+            gen_wavepsf(wx, sy, sz, adc, dt, ncyc, gmax, smax, dy, dz, ofY, ofZ, grady_dt, gradz_dt, grady_da, gradz_da, sine, wave);
+	          W = linop_wave_create(wx, sy, sz, 1, tk, wave_dims[COEFF_DIM], wave);
+
+            inc_wave = linop_chain(pre_wave, W);
+	          A_sc = linop_chain(inc_wave, post_wave);
+	          A = linop_multc_create(nc, md, maps, A_sc);
+          }
+        }
+      }
+    }
+  } else {
+	  double recon_start = timestamp();
+	  J = lsqr2_create(&lsqr_conf, italgo, iconf, (const float*) init, A, NULL, 1, &T, NULL, NULL);
+	  operator_p_apply(J, 1., DIMS, coeff_dims, recon, DIMS, table_dims, table);
+  	md_zsmul(DIMS, coeff_dims, recon, recon, norm);
+	  double recon_end = timestamp();
+	  debug_printf(DP_INFO, "Done.\nReconstruction time: %f seconds.\n", recon_end - recon_start);
+  }
 
 	debug_printf(DP_INFO, "Cleaning up and saving result... ");
 	operator_p_free(J);
 	linop_free(A);
 	linop_free(A_sc);
+  linop_free(inc_wave);
+  linop_free(W);
+  linop_free(pre_wave);
+  linop_free(post_wave);
 	md_free(kernel);
 	unmap_cfl(DIMS, maps_dims, maps);
 	unmap_cfl(DIMS, wave_dims, wave);
