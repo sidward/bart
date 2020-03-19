@@ -1039,7 +1039,7 @@ int main_wshfl(int argc, char* argv[])
 		ksp_dims[2] = sz;
 		ksp_dims[3] = nc;
 		ksp_dims[6] = tk;
-		complex float* res = create_cfl(argv[6], DIMS, ksp_dims);
+		complex float* res = create_cfl(argv[5], DIMS, ksp_dims);
 
 		debug_printf(DP_INFO, "Creating projection k-space...");
 		operator_apply(Knc->adjoint, DIMS, ksp_dims, res, DIMS, table_dims, table);
@@ -1115,7 +1115,7 @@ int main_wshfl(int argc, char* argv[])
 
 		debug_printf(DP_INFO, "Going from coefficients to data table... ");
 		complex float* coeffs_to_fwd = load_cfl(fwd, DIMS, coeff_dims);
-		complex float* table_forward = create_cfl(argv[6], DIMS, table_dims);
+		complex float* table_forward = create_cfl(argv[5], DIMS, table_dims);
 		const struct linop_s* R      = linop_wavereshape_create(wx, sx, sy, sz, 1, tk);
 		const struct linop_s* CFx    = linop_fx_create( wx, sy, sz, 1, tk, true);
 		const struct linop_s* W      = linop_wave_create(wx, sy, sz, 1, tk, wave_dims[COEFF_DIM], wave);
@@ -1270,7 +1270,7 @@ int main_wshfl(int argc, char* argv[])
 		debug_printf(DP_INFO, "Done.\n");
 	}
 
-	complex float* recon = create_cfl(argv[6], DIMS, coeff_dims);
+	complex float* recon = create_cfl(argv[5], DIMS, coeff_dims);
 	struct lsqr_conf lsqr_conf = { 0., gpun >= 0 };
   const struct operator_p_s* J = NULL;
 
