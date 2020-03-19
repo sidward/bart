@@ -949,7 +949,6 @@ int main_wshfl(int argc, char* argv[])
 		OPT_SET(   'p', &pf,                "Use locally low rank and real-imaginary components for partial fourier."),
 		OPT_SET(   'A', &apsf,              "Set to estimate PSF."),
 		OPT_SET(   'n', &sine,              "Set if y-phase encode is sine."),
-
 	};
 
 	cmdline(&argc, argv, 5, 5, usage_str, help_str, ARRAY_SIZE(opts), opts);
@@ -967,13 +966,13 @@ int main_wshfl(int argc, char* argv[])
 	complex float* maps = load_cfl(argv[1], DIMS, maps_dims);
 
 	long phi_dims[DIMS];
-	complex float* phi = load_cfl(argv[3], DIMS, phi_dims);
+	complex float* phi = load_cfl(argv[2], DIMS, phi_dims);
 
 	long reorder_dims[DIMS];
-	complex float* reorder = load_cfl(argv[4], DIMS, reorder_dims);
+	complex float* reorder = load_cfl(argv[3], DIMS, reorder_dims);
 
 	long table_dims[DIMS];
-	complex float* table = load_cfl(argv[5], DIMS, table_dims);
+	complex float* table = load_cfl(argv[4], DIMS, table_dims);
 
 	int wx = table_dims[0];
 	int sx = maps_dims[0];
@@ -990,10 +989,10 @@ int main_wshfl(int argc, char* argv[])
     wave_dims[0] = wx;
     wave_dims[1] = sy;
     wave_dims[2] = sz;
-    wave = anon_cfl(NULL, DIMS, wave_dims);
+    wave = md_alloc(DIMS, wave_dims, CFL_SIZE);
     gen_wavepsf(wx, sy, sz, adc, dt, ncyc, gmax, smax, dy, dz, ofY, ofZ, -trng, -trng, -(1+arng), -(1+arng), sine, wave);
 	} else {
-	  wave = load_cfl(argv[2], DIMS, wave_dims);
+	  wave = load_cfl(wpth, DIMS, wave_dims);
   }
 
 	debug_printf(DP_INFO, "Done.\n");
@@ -1271,7 +1270,6 @@ int main_wshfl(int argc, char* argv[])
 		debug_printf(DP_INFO, "Done.\n");
 	}
 
-	debug_printf(DP_INFO, "Reconstruction... ");
 	complex float* recon = create_cfl(argv[6], DIMS, coeff_dims);
 	struct lsqr_conf lsqr_conf = { 0., gpun >= 0 };
   const struct operator_p_s* J = NULL;
@@ -1289,6 +1287,7 @@ int main_wshfl(int argc, char* argv[])
     float dtstep = (2.0 * trng/search);
     float dastep = 2.0 * (1.0 + arng)/search;
 
+	  debug_printf(DP_INFO, "Searching...\n");
     for (int k1 = 0; k1 < search; k1++) {
       grady_dt += dtstep;
       for (int k2 = 0; k2 < search; k2++) {
@@ -1303,6 +1302,8 @@ int main_wshfl(int argc, char* argv[])
 
 		        operator_apply(A->forward, DIMS, table_dims, testtbl, DIMS, coeff_dims, testrec);
             testerr = md_znrmse(DIMS, table_dims, table, testtbl);
+
+	          debug_printf(DP_INFO, "--> (%1.3e, %1.3e, %1.3e, %1.3e) %1.5e\n", testerr);
 
             if (besterr == -1 || testerr < besterr) {
               besterr = testerr;
@@ -1324,6 +1325,7 @@ int main_wshfl(int argc, char* argv[])
       }
     }
   } else {
+	  debug_printf(DP_INFO, "Reconstruction... ");
 	  double recon_start = timestamp();
 	  J = lsqr2_create(&lsqr_conf, italgo, iconf, (const float*) init, A, NULL, 1, &T, NULL, NULL);
 	  operator_p_apply(J, 1., DIMS, coeff_dims, recon, DIMS, table_dims, table);
@@ -1342,7 +1344,7 @@ int main_wshfl(int argc, char* argv[])
   linop_free(post_wave);
 	md_free(kernel);
 	unmap_cfl(DIMS, maps_dims, maps);
-	unmap_cfl(DIMS, wave_dims, wave);
+  (apsf) ? md_free(wave) : unmap_cfl(DIMS, wave_dims, wave);
 	unmap_cfl(DIMS, phi_dims, phi);
 	unmap_cfl(DIMS, reorder_dims, reorder);
 	unmap_cfl(DIMS, table_dims, table);

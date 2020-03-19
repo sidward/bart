@@ -85,19 +85,26 @@ extern void phase_per_cm(long wx, long adc, float dt, long cyc, float gm, float 
 
 extern void psf_from_phasepercm(long wx, long sy, float dy, float offset, complex float* phasepercm, complex float* psf)
 {
-  complex float tmp[sy][wx];
-	int midy = sy/2;
+	const long ro_dims[1] = {wx};
+	const long pe_dims[1] = {sy};
+  complex float** tmp = md_calloc(1, pe_dims, sizeof(complex float*));
 	complex float phase[wx];
+	int midy = sy/2;
 	float val;
-	const long dims[1] = {wx};
 
 	for (int ydx = 0; ydx < sy; ydx++) {
+    tmp[ydx] = md_calloc(1, ro_dims, sizeof(complex float));
 		val = dy * (ydx - midy) - offset;
-		md_zsmul(1, dims, phase, phasepercm, val);
-		md_zexpj(1, dims, tmp[ydx], phase);
+		md_zsmul(1, ro_dims, phase, phasepercm, val);
+		md_zexpj(1, ro_dims, tmp[ydx], phase);
 	}
+
   const long psf_dims[2] = {wx, sy};
   md_copy(2, psf_dims, psf, tmp, sizeof(complex float));
+
+	for (int ydx = 0; ydx < sy; ydx++)
+    md_free(tmp[ydx]);
+  md_free(tmp);
 }
 
 extern void gen_wavepsf(long wx, long sy, long sz, long adc, float dt, long cyc, float gm, float sm, float dy, float dz, float offset_y, float offset_z, float grady_dt, float gradz_dt, float grady_da, float gradz_da, _Bool isysine, complex float* out)
@@ -114,11 +121,16 @@ extern void gen_wavepsf(long wx, long sy, long sz, long adc, float dt, long cyc,
   }
 
   long psf_dims[3]  = {wx, sy, sz};
-  complex float psfY[wx * sy];
-  complex float psfZ[wx * sz];
+  long psfY_dims[2] = {wx, sy};
+  long psfZ_dims[2] = {wx, sz};
+  complex float* psfY = md_calloc(2, psfY_dims, sizeof(complex float));
+  complex float* psfZ = md_calloc(2, psfZ_dims, sizeof(complex float));
 
   psf_from_phasepercm(wx, sy, dy, offset_y, ppcmY, psfY);
   psf_from_phasepercm(wx, sz, dz, offset_z, ppcmZ, psfZ);
 
   md_zfmac(3, psf_dims, out, psfY, psfZ);
+
+  md_free(psfY);
+  md_free(psfZ);
 }
