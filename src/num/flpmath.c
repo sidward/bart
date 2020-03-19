@@ -2277,7 +2277,7 @@ float md_zrmse(unsigned int D, const long dim[D], const complex float* in1, cons
 /**
  * Calculate normalized root-mean-square error between two complex arrays
  *
- * return RMSE(ref,in) / RMS(in)
+ * return RMSE(ref,in) / RMS(ref)
  */
 float md_znrmse(unsigned int D, const long dim[D], const complex float* ref, const complex float* in)
 {
