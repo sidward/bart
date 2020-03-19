@@ -37,34 +37,34 @@ int main_wavepsf(int argc, char* argv[])
 {
 	
 	// Spatial dimensions.
-	int wx = 512;				// Number of readout points.
-	int sy = 128;				// Number of phase encode points.
-	float dy = 0.1;			// Resolution in the phase encode direction in cm.
+	int wx = 512;       // Number of readout points.
+	int sy = 128;       // Number of phase encode points.
+	float dy = 0.1;     // Resolution in the phase encode direction in cm.
 
 	// ADC parameters.
-	int adc = 3000;			// Readout duration in microseconds.
-	float dt = 1e-5;		// ADC sampling rate in seconds.
+	int adc = 3000;     // Readout duration in microseconds.
+	float dt = 1e-5;    // ADC sampling rate in seconds.
 
 	// Gradient parameters.
-	float gmax = 0.8;		// Maximum gradient amplitude in Gauss per centimeter.
+	float gmax = 0.8;   // Maximum gradient amplitude in Gauss per centimeter.
 	float smax = 17000; // Maximum slew rate in Gauss per centimeter per second.
 
 	// Wave parameters.
-	int ncyc = 6;				// Number of gradient sine-cycles.
+	int ncyc = 6;       // Number of gradient sine-cycles.
 
 	// Sine wave or cosine wave.
 	bool sn = false;    // Set to false to use a cosine gradient wave/
 
 	const struct opt_s opts[] = {
-		OPT_SET(	'S', &sn,   "Set to use a sine gradient wave"),
-		OPT_INT(	'x', &wx,		"RO_dim", "Number of readout points"),
-		OPT_INT(	'y', &sy,		"PE_dim", "Number of phase encode points"),
-		OPT_FLOAT('r', &dy,		"PE_res", "Resolution of phase encode in cm"),
-		OPT_INT(	'a', &adc,	"ADC_T",	"Readout duration in microseconds."),
-		OPT_FLOAT('t', &dt,		"ADC_dt", "ADC sampling rate in seconds"),
-		OPT_FLOAT('g', &gmax, "gMax",		"Maximum gradient amplitude in Gauss/cm"),
-		OPT_FLOAT('s', &smax, "sMax",		"Maximum gradient slew rate in Gauss/cm/second"),
-		OPT_INT(	'n', &ncyc, "ncyc",		"Number of cycles in the gradient wave"),
+		OPT_SET(  'S', &sn,   "Set to use a sine gradient wave"),
+		OPT_INT(  'x', &wx,   "RO_dim", "Number of readout points"),
+		OPT_INT(  'y', &sy,   "PE_dim", "Number of phase encode points"),
+		OPT_FLOAT('r', &dy,   "PE_res", "Resolution of phase encode in cm"),
+		OPT_INT(  'a', &adc,  "ADC_T",  "Readout duration in microseconds."),
+		OPT_FLOAT('t', &dt,   "ADC_dt", "ADC sampling rate in seconds"),
+		OPT_FLOAT('g', &gmax, "gMax",   "Maximum gradient amplitude in Gauss/cm"),
+		OPT_FLOAT('s', &smax, "sMax",   "Maximum gradient slew rate in Gauss/cm/second"),
+		OPT_INT(  'n', &ncyc, "ncyc",   "Number of cycles in the gradient wave"),
 	};
 
 	cmdline(&argc, argv, 1, 1, usage_str, help_str, ARRAY_SIZE(opts), opts);
