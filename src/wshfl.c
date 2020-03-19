@@ -1272,79 +1272,79 @@ int main_wshfl(int argc, char* argv[])
 
 	complex float* recon = create_cfl(argv[5], DIMS, coeff_dims);
 	struct lsqr_conf lsqr_conf = { 0., gpun >= 0 };
-  const struct operator_p_s* J = NULL;
+	const struct operator_p_s* J = NULL;
 
-  if (apsf) {
-    complex float* testtbl = anon_cfl(NULL, DIMS, table_dims);
-    complex float* testrec = anon_cfl(NULL, DIMS, coeff_dims);
+	if (apsf) {
+		complex float* testtbl = anon_cfl(NULL, DIMS, table_dims);
+		complex float* testrec = anon_cfl(NULL, DIMS, coeff_dims);
 
-    float besterr = -1;
-    float testerr = -1;
-    float grady_dt = -trng;
-    float gradz_dt = -trng;
-    float grady_da = -(1 + arng);
-    float gradz_da = -(1 + arng);
-    float dtstep = (2.0 * trng/search);
-    float dastep = 2.0 * (1.0 + arng)/search;
+		float besterr = -1;
+		float testerr = -1;
+		float grady_dt = -trng;
+		float gradz_dt = -trng;
+		float grady_da = -(1 + arng);
+		float gradz_da = -(1 + arng);
+		float dtstep = (2.0 * trng/search);
+		float dastep = 2.0 * (1.0 + arng)/search;
+		
+		debug_printf(DP_INFO, "Reconstruction:\n");
+		for (int k1 = 0; k1 < search; k1++) {
+			grady_dt += dtstep;
+			for (int k2 = 0; k2 < search; k2++) {
+				gradz_dt += dtstep;
+				for (int k3 = 0; k3 < search; k3++) {
+					grady_da += dastep;
+i					for (int k4 = 0; k4 < search; k4++) {
+						gradz_da += dastep;
 
-	  debug_printf(DP_INFO, "Searching...\n");
-    for (int k1 = 0; k1 < search; k1++) {
-      grady_dt += dtstep;
-      for (int k2 = 0; k2 < search; k2++) {
-        gradz_dt += dtstep;
-        for (int k3 = 0; k3 < search; k3++) {
-          grady_da += dastep;
-          for (int k4 = 0; k4 < search; k4++) {
-            gradz_da += dastep;
+						J = lsqr2_create(&lsqr_conf, italgo, iconf, (const float*) init, A, NULL, 1, &T, NULL, NULL);
+						operator_p_apply(J, 1., DIMS, coeff_dims, testrec, DIMS, table_dims, table);
 
-	          J = lsqr2_create(&lsqr_conf, italgo, iconf, (const float*) init, A, NULL, 1, &T, NULL, NULL);
-	          operator_p_apply(J, 1., DIMS, coeff_dims, testrec, DIMS, table_dims, table);
+						operator_apply(A->forward, DIMS, table_dims, testtbl, DIMS, coeff_dims, testrec);
+						testerr = md_zrmse(DIMS, table_dims, table, testtbl);
 
-		        operator_apply(A->forward, DIMS, table_dims, testtbl, DIMS, coeff_dims, testrec);
-            testerr = md_znrmse(DIMS, table_dims, table, testtbl);
+						debug_printf(DP_INFO, "--> (%1.3e, %1.3e, %1.3e, %1.3e) %1.5e\n", grady_dt, gradz_dt, grady_da, gradz_da, testerr);
 
-	          debug_printf(DP_INFO, "--> (%1.3e, %1.3e, %1.3e, %1.3e) %1.5e\n", grady_dt, gradz_dt, grady_da, gradz_da, testerr);
+						if (besterr == -1 || testerr < besterr) {
+							besterr = testerr;
+							md_copy(DIMS, coeff_dims, recon, testrec, CFL_SIZE);
+						}
 
-            if (besterr == -1 || testerr < besterr) {
-              besterr = testerr;
-              md_copy(DIMS, coeff_dims, recon, testrec, CFL_SIZE);
-            }
+						linop_free(A);
+						linop_free(inc_wave);
+						linop_free(W);
 
-            linop_free(A);
-            linop_free(inc_wave);
-            linop_free(W);
+						gen_wavepsf(wx, sy, sz, adc, dt, ncyc, gmax, smax, dy, dz, ofY, ofZ, grady_dt, gradz_dt, grady_da, gradz_da, sine, wave);
+						W = linop_wave_create(wx, sy, sz, 1, tk, wave_dims[COEFF_DIM], wave);
 
-            gen_wavepsf(wx, sy, sz, adc, dt, ncyc, gmax, smax, dy, dz, ofY, ofZ, grady_dt, gradz_dt, grady_da, gradz_da, sine, wave);
-	          W = linop_wave_create(wx, sy, sz, 1, tk, wave_dims[COEFF_DIM], wave);
-
-            inc_wave = linop_chain(pre_wave, W);
-	          A_sc = linop_chain(inc_wave, post_wave);
-	          A = linop_multc_create(nc, md, maps, A_sc);
-          }
-        }
-      }
-    }
-  } else {
-	  debug_printf(DP_INFO, "Reconstruction... ");
-	  double recon_start = timestamp();
-	  J = lsqr2_create(&lsqr_conf, italgo, iconf, (const float*) init, A, NULL, 1, &T, NULL, NULL);
-	  operator_p_apply(J, 1., DIMS, coeff_dims, recon, DIMS, table_dims, table);
-  	md_zsmul(DIMS, coeff_dims, recon, recon, norm);
-	  double recon_end = timestamp();
-	  debug_printf(DP_INFO, "Done.\nReconstruction time: %f seconds.\n", recon_end - recon_start);
-  }
+						inc_wave = linop_chain(pre_wave, W);
+						A_sc = linop_chain(inc_wave, post_wave);
+						A = linop_multc_create(nc, md, maps, A_sc);
+					}
+				}
+			}
+		}
+	} else {
+		debug_printf(DP_INFO, "Reconstruction... ");
+		double recon_start = timestamp();
+		J = lsqr2_create(&lsqr_conf, italgo, iconf, (const float*) init, A, NULL, 1, &T, NULL, NULL);
+		operator_p_apply(J, 1., DIMS, coeff_dims, recon, DIMS, table_dims, table);
+		md_zsmul(DIMS, coeff_dims, recon, recon, norm);
+		double recon_end = timestamp();
+		debug_printf(DP_INFO, "Done.\nReconstruction time: %f seconds.\n", recon_end - recon_start);
+	}
 
 	debug_printf(DP_INFO, "Cleaning up and saving result... ");
 	operator_p_free(J);
 	linop_free(A);
 	linop_free(A_sc);
-  linop_free(inc_wave);
-  linop_free(W);
-  linop_free(pre_wave);
-  linop_free(post_wave);
+	linop_free(inc_wave);
+	linop_free(W);
+	linop_free(pre_wave);
+	linop_free(post_wave);
 	md_free(kernel);
 	unmap_cfl(DIMS, maps_dims, maps);
-  (apsf) ? md_free(wave) : unmap_cfl(DIMS, wave_dims, wave);
+	(apsf) ? md_free(wave) : unmap_cfl(DIMS, wave_dims, wave);
 	unmap_cfl(DIMS, phi_dims, phi);
 	unmap_cfl(DIMS, reorder_dims, reorder);
 	unmap_cfl(DIMS, table_dims, table);
