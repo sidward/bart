@@ -1,9 +1,9 @@
-/* Copyright 2017-2018. Massachusetts Institute of Technology.
+/* Copyright 2017-2020. Massachusetts Institute of Technology.
  * All rights reserved. Use of this source code is governed by
  * a BSD-style license which can be found in the LICENSE file.
  *
  * Authors:
- * 2017-2018 Siddharth Iyer <ssi@mit.edu>
+ * 2017-2020 Siddharth Iyer <ssi@mit.edu>
  *
  * Bilgic B, Gagoski BA, Cauley SF, Fan AP, Polimeni JR, Grant PE, Wald LL, Setsompop K. 
  * Wave‐CAIPI for highly accelerated 3D imaging. Magnetic resonance in medicine. 
@@ -14,22 +14,13 @@
 #include <complex.h>
 #include <math.h>
 
-#include "num/multind.h"
-#include "num/flpmath.h"
-#include "num/fft.h"
 #include "num/init.h"
+#include "wave/wave.h"
 
 #include "misc/debug.h"
-#include "misc/mri.h"
-#include "misc/utils.h"
 #include "misc/mmio.h"
 #include "misc/misc.h"
 #include "misc/opts.h"
-
-// Larmor frequency in Hertz per Gauss
-#ifndef LARMOR
-#define LARMOR 4257.56
-#endif
 
 static const char usage_str[] = "<output>";
 static const char help_str[] = "Generate a wave PSF in hybrid space.\n"
@@ -46,7 +37,7 @@ int main_wavepsf(int argc, char* argv[])
 {
 	
 	// Spatial dimensions.
-	int sx = 512;				// Number of readout points.
+	int wx = 512;				// Number of readout points.
 	int sy = 128;				// Number of phase encode points.
 	float dy = 0.1;			// Resolution in the phase encode direction in cm.
 
@@ -62,11 +53,11 @@ int main_wavepsf(int argc, char* argv[])
 	int ncyc = 6;				// Number of gradient sine-cycles.
 
 	// Sine wave or cosine wave.
-	bool cs = false;		// Set to true to use a cosine gradient wave/
+	bool sn = false;    // Set to false to use a cosine gradient wave/
 
 	const struct opt_s opts[] = {
-		OPT_SET(	'c', &cs,							"Set to use a cosine gradient wave"),
-		OPT_INT(	'x', &sx,		"RO_dim", "Number of readout points"),
+		OPT_SET(	'S', &sn,   "Set to use a sine gradient wave"),
+		OPT_INT(	'x', &wx,		"RO_dim", "Number of readout points"),
 		OPT_INT(	'y', &sy,		"PE_dim", "Number of phase encode points"),
 		OPT_FLOAT('r', &dy,		"PE_res", "Resolution of phase encode in cm"),
 		OPT_INT(	'a', &adc,	"ADC_T",	"Readout duration in microseconds."),
@@ -80,66 +71,15 @@ int main_wavepsf(int argc, char* argv[])
 
 	num_init();
 
-	assert(0 == adc % 10);					// Scanners require ADC_duration to be a multiple of 10.
+	assert(0 == adc % 10); // Scanners require ADC_duration to be a multiple of 10.
 
-	int wavepoints = adc/10;				// Number of points in the gradient wave.
-	float T = wavepoints * dt/ncyc; // Time period of the sine wave.
-	float w = 2 * M_PI/T;						// Frequency in radians per second.
+	complex float phasepercm[wx]; 
+	phase_per_cm(wx, adc, dt, ncyc, gmax, smax, sn, 0, 1, phasepercm);
 
-	/* Calculating the wave-amplitude to use. It is either slew limited or gradient 
-		 amplitude limited. */
-	float gamp = (smax >= w * gmax) ? gmax : smax/w;
-	float gwave[wavepoints];
-	for (int tdx = 0; tdx < wavepoints; tdx++) {
-		gwave[tdx] = gamp * ((cs) ? cos(w * tdx * dt) : sin(w * tdx * dt));
-	}
-	
-	complex float phasepercm[wavepoints];
-	float prephase = -2 * M_PI * LARMOR * gamp/w;
-	float cumsum = 0;
-	for (int tdx = 0; tdx < wavepoints; tdx++) {
-		phasepercm[tdx] = 2 * M_PI * LARMOR * (cumsum + gwave[tdx]/2.0) * dt + prephase;
-		cumsum = cumsum + gwave[tdx]; 
-	}
-
-	// Interpolate to sx via sinc interpolation
-	const long wavepoint_dims[1] = {wavepoints};
-	const long interp_dims[1] = {sx};
-
-	complex float k_phasepercm[wavepoints]; 
-	fftuc(1, wavepoint_dims, 1, k_phasepercm, phasepercm);	
-
-	complex float k_phasepercm_interp[sx]; 
-	md_resize_center(1, interp_dims, k_phasepercm_interp, wavepoint_dims, k_phasepercm, 
-		sizeof(complex float));
-
-	complex float phasepercm_interp_complex[sx]; 
-	ifftuc(1, interp_dims, 1, phasepercm_interp_complex, k_phasepercm_interp);
-
-	complex float phasepercm_interp_real[sx]; 
-	md_zreal(1, interp_dims, phasepercm_interp_real, phasepercm_interp_complex);
-
-	complex float phasepercm_interp[sx]; 
-	float scale = sqrt((float) sx/wavepoints);
-	md_zsmul(1, interp_dims, phasepercm_interp, phasepercm_interp_real, scale);
-
-	complex float psf[sy][sx];
-
-	int midy = sy/2;
-
-	complex float phase[sx];
-	float val;
-
-	for (int ydx = 0; ydx < sy; ydx++) {
-		val = -dy * (ydx - midy);
-		md_zsmul(1, interp_dims, phase, phasepercm_interp, val);
-		md_zexpj(1, interp_dims, psf[ydx], phase);
-	}
-
-	const long psf_dims[3] = {sx, sy, 1};
-	complex float* psf_cfl = create_cfl(argv[1], 3, psf_dims);
-	md_copy(3, psf_dims, psf_cfl, psf, sizeof(complex float));
-	unmap_cfl(3, psf_dims, psf_cfl);
+	const long psf_dims[3] = {wx, sy, 1};
+	complex float* psf = create_cfl(argv[1], 3, psf_dims);
+	psf_from_phasepercm(wx, sy, dy, 0, phasepercm, psf);
+	unmap_cfl(3, psf_dims, psf);
 
 	return 0;
 }

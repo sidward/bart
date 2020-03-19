@@ -168,7 +168,8 @@ ISMRM_BASE ?= /usr/local/ismrmrd/
 TBASE=show slice crop resize join transpose squeeze flatten zeros ones flip circshift extract repmat bitmask reshape version delta copy casorati vec poly index
 TFLP=scale invert conj fmac saxpy sdot spow cpyphs creal carg normalize cdf97 pattern nrmse mip avg cabs zexp
 TNUM=fft fftmod fftshift noise bench threshold conv rss filter mandelbrot wavelet window var std fftrot
-TRECO=pics pocsense sqpics itsense nlinv moba nufft rof tgv sake wave lrmatrix estdims estshift estdelay wavepsf wshfl
+TRECO=pics pocsense sqpics itsense nlinv moba nufft rof tgv sake lrmatrix estdims estshift estdelay
+TWAVE=wshfl wavepsf wave
 TCALIB=ecalib ecaltwo caldir walsh cc ccapply calmat svd estvar whiten
 TMRI=homodyne poisson twixread fakeksp looklocker
 TSIM=phantom traj
@@ -199,17 +200,18 @@ MODULES_rof = -liter -llinops
 MODULES_tgv = -liter -llinops
 MODULES_bench = -lwavelet -llinops
 MODULES_phantom = -lsimu
-MODULES_bart = -lbox -lgrecon -lsense -lnoir -liter -llinops -lwavelet -llowrank -lnoncart -lcalib -lsimu -lsake -ldfwavelet -lnlops -lmoba
+MODULES_bart = -lbox -lgrecon -lsense -lnoir -liter -llinops -lwavelet -llowrank -lnoncart -lcalib -lsimu -lsake -ldfwavelet -lnlops -lmoba -lwave
 MODULES_sake = -lsake
 MODULES_traj = -lnoncart
-MODULES_wave = -liter -lwavelet -llinops -llowrank
+MODULES_wave = -liter -lwavelet -llinops -llowrank -lwave
+MODULES_wavepsf = -lwave
 MODULES_threshold = -llowrank -liter -ldfwavelet -llinops -lwavelet
 MODULES_fakeksp = -lsense -llinops
 MODULES_lrmatrix = -llowrank -liter -llinops
 MODULES_estdims = -lnoncart -llinops
 MODULES_ismrmrd = -lismrm
 MODULES_wavelet = -llinops -lwavelet
-MODULES_wshfl = -llinops -lwavelet -liter -llowrank
+MODULES_wshfl = -llinops -lwavelet -liter -llowrank -lwave
 
 
 MAKEFILES = $(wildcard $(root)/Makefiles/Makefile.*)
@@ -245,7 +247,7 @@ endif
 
 
 
-XTARGETS += $(TBASE) $(TFLP) $(TNUM) $(TIO) $(TRECO) $(TCALIB) $(TMRI) $(TSIM)
+XTARGETS += $(TBASE) $(TFLP) $(TNUM) $(TIO) $(TRECO) $(TCALIB) $(TMRI) $(TSIM) $(TWAVE)
 TARGETS = bart $(XTARGETS)
 
 
@@ -469,7 +471,7 @@ lib/lib$(1).a: lib$(1).a($$($(1)objs))
 
 endef
 
-ALIBS = misc num grecon sense noir iter linops wavelet lowrank noncart calib simu sake dfwavelet nlops moba lapacke box
+ALIBS = misc num grecon sense noir iter linops wavelet lowrank noncart calib simu sake dfwavelet nlops moba lapacke box wave
 $(eval $(foreach t,$(ALIBS),$(eval $(call alib,$(t)))))
 
 
