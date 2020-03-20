@@ -1,6 +1,5 @@
 /* Copyright 2018-2019. Massachusetts Institute of Technology.
  * All rights reserved. Use of this source code is governed by
- * a BSD-style license which can be found in the LICENSE file.
  *
  * Authors: 
  * 2018-2019 Siddharth Iyer <ssi@mit.edu>
@@ -189,8 +188,6 @@ static void kern_apply(const linop_data_t* _data, complex float* dst, const comp
 	long fmac_dims[]    = {wx, nc, tf, tk};
 	long line_dims[]    = {wx, nc,  1,  1};
 
-	complex float* vec = md_alloc_sameplace(4, vec_dims, CFL_SIZE, src);
-
 	long vec_str[4];
 	md_calc_strides(4, vec_str, vec_dims, CFL_SIZE);
 	long phi_mat_str[4];
@@ -204,7 +201,10 @@ static void kern_apply(const linop_data_t* _data, complex float* dst, const comp
 	int z = -1;
 	int t = -1;
 
-	for (int i = 0; i < n; i ++) {
+	complex float* vec = md_alloc_sameplace(4, vec_dims, CFL_SIZE, src);
+	//#pragma omp parallel for
+	for (int i = 0; i < n; i++) {
+		debug_printf(DP_INFO, "\tApply: %d of %n\n", i, n);
 
 		y = lround(creal(data->reorder[i]));
 		z = lround(creal(data->reorder[i + n]));
@@ -214,10 +214,10 @@ static void kern_apply(const linop_data_t* _data, complex float* dst, const comp
 		md_zfmac2(4, fmac_dims, vec_str, vec, phi_in_str, (perm + ((wx * nc * tk) * (y + z * sy))), phi_mat_str, data->phi);
 		md_copy(4, line_dims, dst + (i * wx * nc), vec + (t * wx * nc), CFL_SIZE);
 	}
-
 	md_free(perm);
 	md_free(vec);
 }
+
 
 /* Collapse data table into the temporal basis for memory efficiency. */
 static void kern_adjoint(const linop_data_t* _data, complex float* dst, const complex float* src)
@@ -1275,8 +1275,8 @@ int main_wshfl(int argc, char* argv[])
 	const struct operator_p_s* J = NULL;
 
 	if (apsf) {
-		complex float* testtbl = anon_cfl(NULL, DIMS, table_dims);
-		complex float* testrec = anon_cfl(NULL, DIMS, coeff_dims);
+		complex float* testtbl = md_calloc(DIMS, table_dims, CFL_SIZE);
+		complex float* testrec = md_calloc(DIMS, coeff_dims, CFL_SIZE);
 
 		float besterr = -1;
 		float testerr = -1;
@@ -1284,7 +1284,7 @@ int main_wshfl(int argc, char* argv[])
 		float gradz_dt = -trng;
 		float grady_da = -(1 + arng);
 		float gradz_da = -(1 + arng);
-		float dtstep = (2.0 * trng/search);
+		float dtstep = (2.0 * trng)/search;
 		float dastep = 2.0 * (1.0 + arng)/search;
 		
 		debug_printf(DP_INFO, "Reconstruction:\n");
@@ -1294,29 +1294,44 @@ int main_wshfl(int argc, char* argv[])
 				gradz_dt += dtstep;
 				for (int k3 = 0; k3 < search; k3++) {
 					grady_da += dastep;
-i					for (int k4 = 0; k4 < search; k4++) {
+					for (int k4 = 0; k4 < search; k4++) {
 						gradz_da += dastep;
 
+						md_clear(DIMS, table_dims, testtbl, CFL_SIZE);
+						md_clear(DIMS, coeff_dims, testrec, CFL_SIZE);
+
+            debug_printf(DP_INFO, "lsqr create");
 						J = lsqr2_create(&lsqr_conf, italgo, iconf, (const float*) init, A, NULL, 1, &T, NULL, NULL);
+            debug_printf(DP_INFO, "Op apply");
 						operator_p_apply(J, 1., DIMS, coeff_dims, testrec, DIMS, table_dims, table);
 
+            debug_printf(DP_INFO, "start op apply");
 						operator_apply(A->forward, DIMS, table_dims, testtbl, DIMS, coeff_dims, testrec);
+            debug_printf(DP_INFO, "start nrmse");
 						testerr = md_zrmse(DIMS, table_dims, table, testtbl);
 
-						debug_printf(DP_INFO, "--> (%1.3e, %1.3e, %1.3e, %1.3e) %1.5e\n", grady_dt, gradz_dt, grady_da, gradz_da, testerr);
+						debug_printf(DP_INFO, "--> (%1.8e, %1.8e, %1.8e, %1.8e) %1.8e\n", grady_dt - dtstep, gradz_dt - dtstep, grady_da - dastep, gradz_da - dastep, testerr);
 
 						if (besterr == -1 || testerr < besterr) {
 							besterr = testerr;
+              debug_printf(DP_INFO, "In copy\n");
 							md_copy(DIMS, coeff_dims, recon, testrec, CFL_SIZE);
 						}
 
+            debug_printf(DP_INFO, "Start free\n");
 						linop_free(A);
+						linop_free(A_sc);
 						linop_free(inc_wave);
 						linop_free(W);
+						operator_p_free(J);
 
+            debug_printf(DP_INFO, "genpsf\n");
+            wave = md_calloc(DIMS, wave_dims, CFL_SIZE); // Alloc is linop_free W frees memory too.
 						gen_wavepsf(wx, sy, sz, adc, dt, ncyc, gmax, smax, dy, dz, ofY, ofZ, grady_dt, gradz_dt, grady_da, gradz_da, sine, wave);
+            debug_printf(DP_INFO, "wavelinp\n");
 						W = linop_wave_create(wx, sy, sz, 1, tk, wave_dims[COEFF_DIM], wave);
 
+            debug_printf(DP_INFO, "chain\n");
 						inc_wave = linop_chain(pre_wave, W);
 						A_sc = linop_chain(inc_wave, post_wave);
 						A = linop_multc_create(nc, md, maps, A_sc);
@@ -1324,18 +1339,20 @@ i					for (int k4 = 0; k4 < search; k4++) {
 				}
 			}
 		}
+		md_free(table_dims);
+		md_free(coeff_dims);
 	} else {
 		debug_printf(DP_INFO, "Reconstruction... ");
 		double recon_start = timestamp();
 		J = lsqr2_create(&lsqr_conf, italgo, iconf, (const float*) init, A, NULL, 1, &T, NULL, NULL);
 		operator_p_apply(J, 1., DIMS, coeff_dims, recon, DIMS, table_dims, table);
 		md_zsmul(DIMS, coeff_dims, recon, recon, norm);
+		operator_p_free(J);
 		double recon_end = timestamp();
 		debug_printf(DP_INFO, "Done.\nReconstruction time: %f seconds.\n", recon_end - recon_start);
 	}
 
 	debug_printf(DP_INFO, "Cleaning up and saving result... ");
-	operator_p_free(J);
 	linop_free(A);
 	linop_free(A_sc);
 	linop_free(inc_wave);
