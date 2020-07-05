@@ -892,6 +892,7 @@ int main_wshfl(int argc, char* argv[])
 	float rho       = 1;
 	bool  hgwld     = false;
 	bool  ksp       = false;
+	bool  fista     = false;
 	const char* fwd = NULL;
 	const char* x0  = NULL;
 	int   gpun      = -1;
@@ -906,6 +907,7 @@ int main_wshfl(int argc, char* argv[])
 		OPT_STRING( 'F', &fwd,     "frwrd",     "Go from shfl-coeffs to data-table. Pass in coeffs path."),
 		OPT_STRING( 'O', &x0,      "initl",     "Initialize reconstruction with guess."),
 		OPT_INT(    'g', &gpun,    "gpunm",     "GPU device number."),
+		OPT_SET(    'f', &fista,                "Use FISTA over ADMM."),
 		OPT_SET(    'K', &ksp,                  "Go from data-table to shuffling basis k-space."),
 		OPT_SET(    'H', &hgwld,                "Use hogwild."),
 		OPT_SET(    'v', &dcx,                  "Split coefficients to real and imaginary components."),
@@ -1039,6 +1041,19 @@ int main_wshfl(int argc, char* argv[])
 	debug_printf(DP_INFO, "Single channel forward operator information:\n");
 	print_opdims(A_sc);
 
+	float eval = -1;
+	float step = 0.5;
+	if (fista) {
+#ifdef USE_CUDA
+		eval = (gpun >= 0) ? estimate_maxeigenval_gpu(A_sc->normal) : estimate_maxeigenval(A_sc->normal);
+#else
+		eval = estimate_maxeigenval(A_sc->normal);
+#endif
+		step /= eval;
+		debug_printf(DP_INFO, "\tMax eval: %.2e\n", eval);
+		debug_printf(DP_INFO, "\tStep:     %.2e\n", step);
+	}
+
 	struct linop_s* A = linop_multc_create(nc, md, maps, A_sc);
 	debug_printf(DP_INFO, "Overall forward linear operator information:\n");
 	print_opdims(A);
@@ -1101,8 +1116,8 @@ int main_wshfl(int argc, char* argv[])
 	int nr_penalties = ropts.r;
 	struct reg_s* regs = ropts.regs;
 
-	enum algo_t algo = ALGO_ADMM;
-	struct iter it = italgo_config(algo, nr_penalties, regs, maxiter, -1, hgwld, false, admm, 1, false);
+	enum algo_t algo = fista ? ALGO_FISTA : ALGO_ADMM;
+	struct iter it = italgo_config(algo, nr_penalties, regs, maxiter, step, hgwld, false, admm, 1, false);
 	debug_printf(DP_INFO, "Done.\n");
 
 	complex float* init = NULL;
@@ -1116,7 +1131,9 @@ int main_wshfl(int argc, char* argv[])
 	complex float* recon = create_cfl(argv[6], DIMS, coeff_dims);
 	struct lsqr_conf lsqr_conf = { 0., gpun >= 0 };
 	double recon_start = timestamp();
-	const struct operator_p_s* J = lsqr2_create(&lsqr_conf, it.italgo, it.iconf, (const float*) init, A, NULL, nr_penalties, thresh_ops, trafos, NULL);
+	const struct operator_p_s* J = fista ?
+		lsqr2_create(&lsqr_conf, it.italgo, it.iconf, (const float*) init, A, NULL, nr_penalties, thresh_ops, NULL,   NULL):
+		lsqr2_create(&lsqr_conf, it.italgo, it.iconf, (const float*) init, A, NULL, nr_penalties, thresh_ops, trafos, NULL);
 	operator_p_apply(J, 1., DIMS, coeff_dims, recon, DIMS, table_dims, table);
 	md_zsmul(DIMS, coeff_dims, recon, recon, norm);
 	double recon_end = timestamp();
