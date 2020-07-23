@@ -890,9 +890,9 @@ int main_wshfl(int argc, char* argv[])
 	int   cgiter    = 10;
 	int   blksize   = 8;
 	float rho       = 1;
+	float tol       = 1E-3;
 	bool  hgwld     = false;
 	bool  ksp       = false;
-	bool  fista     = false;
 	const char* fwd = NULL;
 	const char* x0  = NULL;
 	int   gpun      = -1;
@@ -906,8 +906,8 @@ int main_wshfl(int argc, char* argv[])
 		OPT_FLOAT(  's', &rho,     "admrho",    "ADMM Rho value."),
 		OPT_STRING( 'F', &fwd,     "frwrd",     "Go from shfl-coeffs to data-table. Pass in coeffs path."),
 		OPT_STRING( 'O', &x0,      "initl",     "Initialize reconstruction with guess."),
+		OPT_FLOAT(  't', &tol,     "toler",     "Tolerance convergence condition for FISTA."),
 		OPT_INT(    'g', &gpun,    "gpunm",     "GPU device number."),
-		OPT_SET(    'f', &fista,                "Use FISTA over ADMM."),
 		OPT_SET(    'K', &ksp,                  "Go from data-table to shuffling basis k-space."),
 		OPT_SET(    'H', &hgwld,                "Use hogwild."),
 		OPT_SET(    'v', &dcx,                  "Split coefficients to real and imaginary components."),
@@ -1041,19 +1041,6 @@ int main_wshfl(int argc, char* argv[])
 	debug_printf(DP_INFO, "Single channel forward operator information:\n");
 	print_opdims(A_sc);
 
-	float eval = -1;
-	float step = 0.5;
-	if (fista) {
-#ifdef USE_CUDA
-		eval = (gpun >= 0) ? estimate_maxeigenval_gpu(A_sc->normal) : estimate_maxeigenval(A_sc->normal);
-#else
-		eval = estimate_maxeigenval(A_sc->normal);
-#endif
-		step /= eval;
-		debug_printf(DP_INFO, "\tMax eval: %.2e\n", eval);
-		debug_printf(DP_INFO, "\tStep:     %.2e\n", step);
-	}
-
 	struct linop_s* A = linop_multc_create(nc, md, maps, A_sc);
 	debug_printf(DP_INFO, "Overall forward linear operator information:\n");
 	print_opdims(A);
@@ -1108,17 +1095,51 @@ int main_wshfl(int argc, char* argv[])
 	fftmod_apply(sy, sz, reorder_dims, reorder, table_dims, table, maps_dims, maps);
 	debug_printf(DP_INFO, "Done.\n");
 
-	debug_printf(DP_INFO, "Preparing reconstruction operator... ");
+	debug_printf(DP_INFO, "Preparing reconstruction operator: ");
 	const struct operator_p_s* thresh_ops[NUM_REGS] = { NULL };
 	const struct linop_s* trafos[NUM_REGS] = { NULL };
 
 	opt_reg_configure(DIMS, coeff_dims, &ropts, thresh_ops, trafos, blksize, 1, gpun >= 0);
 	int nr_penalties = ropts.r;
 	struct reg_s* regs = ropts.regs;
+	bool fista = (nr_penalties == 1);
 
-	enum algo_t algo = fista ? ALGO_FISTA : ALGO_ADMM;
-	struct iter it = italgo_config(algo, nr_penalties, regs, maxiter, step, hgwld, false, admm, 1, false);
-	debug_printf(DP_INFO, "Done.\n");
+	// FISTA variables.
+	float eval = -1;
+	float step = 0.5;
+	italgo_fun2_t italgo = iter2_call_iter;
+	struct iter_call_s iter2_data;
+	SET_TYPEID(iter_call_s, &iter2_data);
+	iter_conf* iconf = CAST_UP(&iter2_data);
+	struct iter_fista_conf fsconf = iter_fista_defaults;
+
+	// ADMM variables.
+	struct iter it;
+
+	if (fista) {
+#ifdef USE_CUDA
+		eval = (gpun >= 0) ? estimate_maxeigenval_gpu(A_sc->normal) : estimate_maxeigenval(A_sc->normal);
+#else
+		eval = estimate_maxeigenval(A_sc->normal);
+#endif
+		step /= eval;
+		debug_printf(DP_INFO, "\tAlgorithm:      FISTA.\n");
+		debug_printf(DP_INFO, "\tMax eigenvalue: %.2e\n", eval);
+		debug_printf(DP_INFO, "\tStep:           %.2e\n", step);
+		debug_printf(DP_INFO, "\tTolerance:      %.2e\n", tol);
+
+		fsconf.maxiter      = maxiter;
+		fsconf.step         = step;
+		fsconf.hogwild      = hgwld;
+		fsconf.tol          = tol;
+
+		iter2_data.fun   = iter_fista;
+		iter2_data._conf = CAST_UP(&fsconf);
+	} else {
+		debug_printf(DP_INFO, "\tAlgorithm: ADMM\n.");
+		debug_printf(DP_INFO, "\tRho:       %.2e\n.", rho);
+		it = italgo_config(ALGO_ADMM, nr_penalties, regs, maxiter, step, hgwld, false, admm, 1, false);
+	}
 
 	complex float* init = NULL;
 	if (x0 != NULL) {
@@ -1132,7 +1153,7 @@ int main_wshfl(int argc, char* argv[])
 	struct lsqr_conf lsqr_conf = { 0., gpun >= 0 };
 	double recon_start = timestamp();
 	const struct operator_p_s* J = fista ?
-		lsqr2_create(&lsqr_conf, it.italgo, it.iconf, (const float*) init, A, NULL, nr_penalties, thresh_ops, NULL,   NULL):
+		lsqr2_create(&lsqr_conf, italgo,    iconf,    (const float*) init, A, NULL, nr_penalties, thresh_ops, NULL,   NULL):
 		lsqr2_create(&lsqr_conf, it.italgo, it.iconf, (const float*) init, A, NULL, nr_penalties, thresh_ops, trafos, NULL);
 	operator_p_apply(J, 1., DIMS, coeff_dims, recon, DIMS, table_dims, table);
 	md_zsmul(DIMS, coeff_dims, recon, recon, norm);
