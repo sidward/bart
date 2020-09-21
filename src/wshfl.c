@@ -6,7 +6,7 @@
  * 2018-2019 Siddharth Iyer <ssi@mit.edu>
  *
  * Tamir J, Uecker M, Chen W, Lai P, Alley MT, Vasanawala SS, Lustig M. 
- * T2 shuffling: Sharp, multicontrast, volumetric fast spin‐echo imaging. 
+ * T2 shuffling: Sharp, const multicontrast, volumetric fast spin‐echo imaging. 
  * Magnetic resonance in medicine. 2017 Jan 1;77(1):180-95.
  *
  * B Bilgic, BA Gagoski, SF Cauley, AP Fan, JR Polimeni, PE Grant,
@@ -44,6 +44,7 @@
 #include "linops/linop.h"
 #include "linops/fmac.h"
 #include "linops/someops.h"
+#include "linops/waveop.h"
 #include "linops/decompose_complex.h"
 
 #include "misc/debug.h"
@@ -879,6 +880,63 @@ static void fftmod_apply(long sy, long sz,
 	}
 }
 
+static double wshfl_tpsf(struct linop_s* A_sc)
+{
+	const struct iovec_s* domain = linop_domain(A_sc);
+	assert(domain->N == DIMS);
+
+	const long* img_dims = domain->dims;
+	long strs[DIMS];
+	md_calc_strides(DIMS, strs, img_dims, CFL_SIZE);
+
+	unsigned int WAVFLAG = (img_dims[0] > 1) * READ_FLAG | (img_dims[1] > 1) * PHS1_FLAG | (img_dims[2] > 1) * PHS2_FLAG;
+	long minsize[] = { [0 ... DIMS - 1] = 1 };
+	minsize[0] = MIN(img_dims[0], 16);
+	minsize[1] = MIN(img_dims[1], 16);
+	minsize[2] = MIN(img_dims[2], 16);
+
+	const struct linop_s* W = linop_wavelet_create(DIMS, WAVFLAG, img_dims, strs, minsize, false);
+	const struct iovec_s* wavelet_codomain = linop_codomain(W);
+    
+    const long* wav_dims = wavelet_codomain->dims;
+    unsigned int N = md_calc_size(DIMS, wav_dims);
+
+    complex float* wav_vec = md_alloc(DIMS, wav_dims, CFL_SIZE);
+    complex float* img_vec = md_alloc(DIMS, img_dims, CFL_SIZE);
+    complex float* out_vec = md_alloc(DIMS, img_dims, CFL_SIZE);
+
+    double tpsf  = 0;
+    double val   = 0;
+    double delta = 0;
+    for (unsigned int p = 0; p < N; p++) {
+        md_clear(DIMS, wav_dims, wav_vec, CFL_SIZE);
+        md_clear(DIMS, img_dims, img_vec, CFL_SIZE);
+        md_clear(DIMS, img_dims, out_vec, CFL_SIZE);
+
+        wav_vec[p] = 1;
+        linop_adjoint(W, DIMS, img_dims, img_vec, DIMS, wav_dims, wav_vec);
+        linop_normal(A_sc, DIMS, img_dims, out_vec, img_vec);
+        md_clear(DIMS, wav_dims, wav_vec, CFL_SIZE);
+        linop_forward(W, DIMS, wav_dims, wav_vec, DIMS, img_dims, out_vec);
+
+        delta = (double) cabs(wav_vec[p]);
+        for (unsigned int q = 0; q < N; q++) {
+            if (p == q)
+                continue;
+            val = (double) cabsf(wav_vec[q]) / (double) delta;
+            if (val > tpsf)
+                tpsf = val;
+        }
+        debug_printf(DP_INFO, "Iteration: %12d, TPSF: %5.2f\%\n", p, tpsf);
+    }
+
+    md_free(wav_vec);
+    md_free(img_vec);
+    md_free(out_vec);
+
+    return tpsf;
+}
+
 int main_wshfl(int argc, char* argv[])
 {
 	double start_time = timestamp();
@@ -1040,6 +1098,9 @@ int main_wshfl(int argc, char* argv[])
 
 	debug_printf(DP_INFO, "Single channel forward operator information:\n");
 	print_opdims(A_sc);
+
+    printf("TPSF: %f\n", wshfl_tpsf(A_sc));
+	return 0;
 
 	struct linop_s* A = linop_multc_create(nc, md, maps, A_sc);
 	debug_printf(DP_INFO, "Overall forward linear operator information:\n");
