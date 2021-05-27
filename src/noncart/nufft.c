@@ -16,6 +16,7 @@
 #include <stdbool.h>
 
 #include "misc/misc.h"
+#include "misc/mmio.h"
 #include "misc/debug.h"
 
 #include "num/multind.h"
@@ -48,6 +49,9 @@ struct nufft_conf_s nufft_conf_defaults = {
 	.flags = FFT_FLAGS,
 	.cfft = 0u,
 	.decomp = true,
+
+	.save_psf_path = NULL,
+	.load_psf_path = NULL,
 };
 
 #include "nufft_priv.h"
@@ -638,9 +642,27 @@ static struct linop_s* nufft_create3(unsigned int N,
 
 		md_calc_strides(ND, data->psf_strs, data->psf_dims, CFL_SIZE);
 
-		data->psf = compute_psf2(N, data->psf_dims, data->flags, data->trj_dims, data->traj,
-					data->bas_dims, data->basis, data->wgh_dims, data->weights,
-					true /*conf.periodic*/, conf.lowmem);
+		if (conf.load_psf_path != NULL) {
+
+			complex float* tmp_psf = load_cfl(conf.load_psf_path, ND, data->psf_dims);
+			data->psf = md_calloc(ND, data->psf_dims, CFL_SIZE);
+			md_copy(ND, data->psf_dims, (complex float*) data->psf, tmp_psf, CFL_SIZE);
+			unmap_cfl(ND, data->psf_dims, tmp_psf);
+
+		} else {
+
+			data->psf = compute_psf2(N, data->psf_dims, data->flags, data->trj_dims, data->traj,
+				                       data->bas_dims, data->basis, data->wgh_dims, data->weights,
+				                       true /*conf.periodic*/, conf.lowmem);
+
+			if (conf.save_psf_path != NULL) {
+				complex float* psf_out = create_cfl(conf.save_psf_path, ND, data->psf_dims);
+				md_clear(ND, data->psf_dims, psf_out, CFL_SIZE);
+				md_copy(ND, data->psf_dims, psf_out, data->psf, CFL_SIZE);
+				unmap_cfl(ND, data->psf_dims, psf_out);
+			}
+
+		}
 	}
 
 

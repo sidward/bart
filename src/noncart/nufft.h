@@ -19,6 +19,10 @@ struct nufft_conf_s {
 	unsigned long flags;
 	unsigned long cfft;
 	_Bool decomp;
+
+  const char* save_psf_path;
+  const char* load_psf_path;
+
 };
 
 extern struct nufft_conf_s nufft_conf_defaults;

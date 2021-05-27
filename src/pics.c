@@ -119,8 +119,8 @@ int main_pics(int argc, char* argv[argc])
 	bool eigen = false;
 	float scaling = 0.;
 
-        // Simultaneous Multi-Slice
-        bool sms = false;
+	// Simultaneous Multi-Slice
+	bool sms = false;
 
 	unsigned int llr_blk = 8;
 
@@ -186,6 +186,8 @@ int main_pics(int argc, char* argv[argc])
 		OPT_SELECT('a', enum algo_t, &algo, ALGO_PRIDU, "select Primal Dual"),
 		OPT_SET('M', &sms, "Simultaneous Multi-Slice reconstruction"),
 		OPTL_SET('U', "lowmem", &nuconf.lowmem, "Use low-mem mode of the nuFFT"),
+		OPT_OUTFILE('X', &nuconf.save_psf_path, "", "Path to save non-cartesian PSF"),
+		OPT_INFILE('x', &nuconf.load_psf_path, "", "Load non-cartesian PSF"),
 	};
 
 
@@ -239,6 +241,8 @@ int main_pics(int argc, char* argv[argc])
 
 	long basis_dims[DIMS];
 	complex float* basis = NULL;
+
+	assert(nuconf.save_psf_path == NULL || nuconf.load_psf_path == NULL);
 
 	if (NULL != basis_file) {
 
@@ -707,6 +711,8 @@ int main_pics(int argc, char* argv[argc])
 	xfree(pat_file);
 	xfree(traj_file);
 	xfree(basis_file);
+	xfree(nuconf.save_psf_path);
+	xfree(nuconf.load_psf_path);
 
 	double end_time = timestamp();
 
